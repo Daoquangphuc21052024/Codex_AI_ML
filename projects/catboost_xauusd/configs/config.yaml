@@ -1,4 +1,4 @@
-# schema_version: 0.6.0
+# schema_version: 0.7.0
 mt5:
   source: "mt5"
   symbol: "XAUUSD"
@@ -21,7 +21,7 @@ labeling:
   dominance_threshold: 0.15
 
 features:
-  max_features: 15
+  max_features: 60
   windows: [6, 12, 24]
   corr_threshold: 0.85
 

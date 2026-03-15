@@ -1,49 +1,35 @@
-# CatBoost XAUUSD H1 MT5 Pipeline (v0.6.0)
+# CatBoost XAUUSD H1 MT5 Pipeline (v0.7.0)
 
-Production-style pipeline for XAUUSD H1 with strict time-series walk-forward, robust 3-class labeling, label-consistent backtest, and ONNX export.
+Production pipeline for XAUUSD H1 using MT5 + CatBoost + ONNX with strict time-series controls.
 
-## Class semantics (explicit)
-- `0`: no-trade / rejected sample (low move, ambiguous, conflict, or model gate).
+## What is improved in v0.7.0
+- Deep feature expansion to a **professional multi-family candidate space** (up to 60 final features).
+- Label engine and backtest engine are explicitly aligned on entry mode, TP/SL, tie, and horizon.
+- Backtest includes spread/slippage/commission and produces full trade log + summary.
+- Fold-local feature selection and validation-only threshold tuning (anti-leakage).
+
+## Class definitions
+- `0`: no-trade (low movement, ambiguous/conflict setup, or model no-trade gate).
 - `1`: buy TP-first expected.
 - `2`: sell TP-first expected.
 
-## v0.6.0 core upgrades
-- Label redesign with explicit ambiguity handling (`dominance_threshold`, `min_move_atr`, conflict rejection).
-- Entry assumption standardized (`entry_mode: next_open` or `signal_close`) and reused in both labeling + backtest.
-- Backtest rebuilt to TP/SL/horizon first-hit event engine (same semantics as label), with spread/slippage/commission.
-- Full trade log + backtest summary artifacts.
-- Fold-local feature pruning only from train split (MI + correlation) to avoid leakage.
-- Validation-only threshold tuning with class-collapse penalty.
-- Per-fold class distribution / MCC / confusion artifacts.
+## Feature families (candidate pool)
+1. price return
+2. range/volatility
+3. candle structure
+4. momentum/velocity
+5. trend/regime
+6. microstructure-lite (from MT5 bar+tick volume)
+7. session/time
+8. normalized
+9. context
+10. label-aligned setup quality
 
-## Project structure
-```text
-projects/catboost_xauusd/
-├── configs/config.yaml
-├── requirements.txt
-├── run_pipeline.py
-├── scripts/smoke_test_csv.py
-└── src/catboost_xauusd/
-    ├── backtest.py
-    ├── config.py
-    ├── exporter.py
-    ├── features.py
-    ├── labeling.py
-    ├── logging_utils.py
-    ├── modeling.py
-    ├── mt5_connector.py
-    ├── pipeline.py
-    ├── preprocess.py
-    ├── reporting.py
-    └── validation.py
-```
-
-## Config highlights
-`configs/config.yaml` (schema v0.6.0):
-- `labeling.entry_mode`: `next_open` (recommended).
-- `labeling.min_move_atr`: reject low movement noisy bars.
-- `labeling.dominance_threshold`: reject weak side dominance.
-- `backtest`: spread/slippage/commission/risk/confidence filter.
+## Config (schema v0.7.0)
+`configs/config.yaml` includes:
+- `features.max_features` (<= 60)
+- label controls: `entry_mode`, `min_move_atr`, `dominance_threshold`
+- backtest execution assumptions: spread/slippage/commission/risk/confidence
 
 ## Run
 ```bash
@@ -57,7 +43,7 @@ cd E:\GPT\catboost_xauusd
 python run_pipeline.py --config configs/config.yaml
 ```
 
-## Smoke test (offline CSV)
+## Offline smoke test
 ```bash
 python scripts/smoke_test_csv.py
 ```
@@ -66,9 +52,12 @@ python scripts/smoke_test_csv.py
 - `artifacts/catboost_xauusd.onnx`
 - `artifacts/feature_schema.json`
 - `artifacts/onnx_verification.json`
+- `artifacts/candidate_features.json`
+- `artifacts/feature_families.json`
+- `artifacts/fold_selected_features.json`
+- `artifacts/feature_selection_summary.json`
 - `artifacts/fold_metrics.csv`
 - `artifacts/fold_confusion_matrices.json`
-- `artifacts/fold_selected_features.json`
 - `artifacts/label_diagnostics.json`
 - `artifacts/backtest_results.csv`
 - `artifacts/trade_log.csv`
@@ -76,4 +65,4 @@ python scripts/smoke_test_csv.py
 - `reports/*.png`
 
 ## ONNX safety
-Feature order is pinned in `feature_schema.json`. MT5 inference must use exact same order and float32 dtype.
+Use exact `feature_order` from `feature_schema.json` with float32 in MQL5 inference.

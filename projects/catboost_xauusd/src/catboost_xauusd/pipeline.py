@@ -37,7 +37,7 @@ def run(config_path: str) -> None:
     raw_df.to_csv(cfg.paths.raw_data, index=False)
 
     clean_df = clean_ohlcv(raw_df)
-    feature_df, candidate_features = engineer_features(clean_df, cfg.features)
+    feature_df, candidate_features, feature_families = engineer_features(clean_df, cfg.features)
     labeled_df, diagnostics = create_labels(feature_df, cfg.labeling)
 
     folds = make_walk_forward_folds(labeled_df, cfg.train)
@@ -111,6 +111,30 @@ def run(config_path: str) -> None:
 
     with (out_dir / "fold_selected_features.json").open("w", encoding="utf-8") as f:
         json.dump(fold_features, f, ensure_ascii=False, indent=2)
+
+    with (out_dir / "candidate_features.json").open("w", encoding="utf-8") as f:
+        json.dump(candidate_features, f, ensure_ascii=False, indent=2)
+
+    with (out_dir / "feature_families.json").open("w", encoding="utf-8") as f:
+        json.dump(feature_families, f, ensure_ascii=False, indent=2)
+
+    fold_stability: dict[str, int] = {}
+    for features in fold_features.values():
+        for feat in features:
+            fold_stability[feat] = fold_stability.get(feat, 0) + 1
+
+    with (out_dir / "feature_selection_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "candidate_feature_count": len(candidate_features),
+                "final_selected_count": len(final_features),
+                "max_features_config": cfg.features.max_features,
+                "fold_stability": fold_stability,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     with (out_dir / "fold_confusion_matrices.json").open("w", encoding="utf-8") as f:
         json.dump(fold_confusions, f, ensure_ascii=False, indent=2)
