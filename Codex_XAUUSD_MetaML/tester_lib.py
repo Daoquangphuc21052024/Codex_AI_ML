@@ -347,7 +347,13 @@ def backtest_probabilities(
     return trades_df, metrics
 
 
-def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "reports") -> dict[str, str]:
+def save_backtest_reports(
+    trades_df: pd.DataFrame,
+    symbol: str,
+    out_dir: str = "reports",
+    full_close: pd.Series | None = None,
+    split_markers: dict[str, pd.Timestamp] | None = None,
+) -> dict[str, str]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     if trades_df.empty:
         return {}
@@ -359,6 +365,14 @@ def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(trades_df["exit_time"], eq, color="#1f77b4")
     ax.set_title(f"{symbol} Equity Curve")
+    if split_markers:
+        for name, ts in split_markers.items():
+            ts = pd.to_datetime(ts)
+            if pd.isna(ts):
+                continue
+            if trades_df["exit_time"].min() <= ts <= trades_df["exit_time"].max():
+                ax.axvline(ts, linestyle="--", linewidth=1, alpha=0.75)
+                ax.text(ts, np.nanmax(eq), name, fontsize=8, rotation=90, va="top", ha="right")
     p = f"{out_dir}/{symbol}_equity_curve.png"
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -399,6 +413,27 @@ def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "
 
     by_side = trades_df.groupby("side")["pnl"].sum().rename("pnl")
     by_side.to_csv(f"{out_dir}/{symbol}_pnl_by_side.csv")
+
+    if full_close is not None and len(full_close) > 0:
+        timeline = full_close.dropna().copy()
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(timeline.index, timeline.values, color="#1f77b4", linewidth=1.0, label="close")
+        if split_markers:
+            colors = {"train_start": "green", "train_end": "green", "val_start": "orange", "val_end": "orange", "test_start": "red", "test_end": "red"}
+            for name, ts in split_markers.items():
+                ts = pd.to_datetime(ts)
+                if pd.isna(ts):
+                    continue
+                ax.axvline(ts, linestyle="--", color=colors.get(name, "gray"), alpha=0.8, linewidth=1.0)
+                y_ref = float(np.interp(pd.Timestamp(ts).value, timeline.index.view("i8"), timeline.values)) if len(timeline) > 2 else timeline.iloc[-1]
+                ax.text(ts, y_ref, name, fontsize=8, rotation=90, va="bottom", ha="right", color=colors.get(name, "gray"))
+
+        ax.set_title(f"{symbol} Full Timeline with Train/Val/Test Milestones")
+        ax.legend(loc="best")
+        p = f"{out_dir}/{symbol}_full_timeline_splits.png"
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        paths["full_timeline_splits_png"] = p
 
     paths["trade_log_csv"] = f"{out_dir}/{symbol}_trade_log.csv"
     paths["monthly_summary_csv"] = f"{out_dir}/{symbol}_monthly_summary.csv"

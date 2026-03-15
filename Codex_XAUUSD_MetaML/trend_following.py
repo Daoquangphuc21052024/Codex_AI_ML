@@ -380,7 +380,21 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         sl_atr_sell=HP.label_sl_sell_atr,
     )
 
-    save_backtest_reports(trades_df, HP.symbol, out_dir="reports")
+    split_markers = {
+        "train_start": trX.index.min(),
+        "train_end": trX.index.max(),
+        "val_start": vaX.index.min(),
+        "val_end": vaX.index.max(),
+        "test_start": teX.index.min(),
+        "test_end": teX.index.max(),
+    }
+    save_backtest_reports(
+        trades_df,
+        HP.symbol,
+        out_dir="reports",
+        full_close=data["close"],
+        split_markers=split_markers,
+    )
     save_dual_classification_reports(te_buy, te_sell, test_prob_buy, test_prob_sell, HP.symbol, out_dir="reports")
     save_feature_importance(model_buy, selected, HP.symbol, out_dir="reports", top_n=20, tag="_buy", feature_groups=feature_groups)
     save_feature_importance(model_sell, selected, HP.symbol, out_dir="reports", top_n=20, tag="_sell", feature_groups=feature_groups)
@@ -466,6 +480,7 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
             "val": {"start": str(vaX.index.min()), "end": str(vaX.index.max())},
             "test": {"start": str(teX.index.min()), "end": str(teX.index.max())},
         },
+        "split_markers": {k: str(v) for k, v in split_markers.items()},
         "feature_counts": {"original": len(main_features), "selected": len(selected)},
         "feature_names_used": selected,
         "label_diagnostics_by_split": label_diag,
