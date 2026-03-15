@@ -23,8 +23,17 @@ def run(config_path: str) -> None:
     cfg = load_config(config_path)
     logger = setup_logging(cfg.paths.logs_dir)
 
-    connector = MT5Connector(cfg.mt5, logger)
-    raw_df = connector.fetch_rates()
+    if cfg.mt5.source.lower() == "mt5":
+        connector = MT5Connector(cfg.mt5, logger)
+        raw_df = connector.fetch_rates()
+    elif cfg.mt5.source.lower() == "csv":
+        if not cfg.mt5.csv_path:
+            raise ValueError("mt5.csv_path is required when mt5.source=csv")
+        raw_df = pd.read_csv(cfg.mt5.csv_path)
+        logger.info("Loaded %d rows from CSV source: %s", len(raw_df), cfg.mt5.csv_path)
+    else:
+        raise ValueError(f"Unsupported mt5.source={cfg.mt5.source}")
+
     Path(cfg.paths.raw_data).parent.mkdir(parents=True, exist_ok=True)
     raw_df.to_csv(cfg.paths.raw_data, index=False)
 
@@ -85,7 +94,7 @@ def run(config_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="XAUUSD H1 CatBoost training pipeline")
-    parser.add_argument("--config", default="projects/catboost_xauusd/configs/config.yaml")
+    parser.add_argument("--config", default="configs/config.yaml")
     args = parser.parse_args()
     run(args.config)
 

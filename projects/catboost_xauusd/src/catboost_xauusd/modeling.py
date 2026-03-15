@@ -46,7 +46,7 @@ def tune_hyperparameters(
                         "depth": d,
                         "learning_rate": lr,
                         "l2_leaf_reg": l2,
-                        "iterations": 500,
+                        "iterations": cfg.iterations,
                         "loss_function": "MultiClass",
                         "random_seed": cfg.random_state,
                         "verbose": False,

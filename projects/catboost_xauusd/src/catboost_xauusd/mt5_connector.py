@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 
-import MetaTrader5 as mt5
 import pandas as pd
 
 from .config import MT5Config
@@ -15,13 +14,35 @@ class MT5Connector:
     config: MT5Config
     logger: logging.Logger
 
-    def _resolve_timeframe(self) -> int:
+    def _resolve_timeframe(self, mt5_module: object) -> int:
         attr = f"TIMEFRAME_{self.config.timeframe}"
-        if not hasattr(mt5, attr):
+        if not hasattr(mt5_module, attr):
             raise ValueError(f"Unsupported timeframe: {self.config.timeframe}")
-        return int(getattr(mt5, attr))
+        return int(getattr(mt5_module, attr))
+
+    def _resolve_timerange(self) -> tuple[datetime, datetime]:
+        utc_to = (
+            datetime.fromisoformat(self.config.end_utc.replace("Z", "+00:00"))
+            if self.config.end_utc
+            else datetime.now(timezone.utc)
+        )
+        utc_from = (
+            datetime.fromisoformat(self.config.start_utc.replace("Z", "+00:00"))
+            if self.config.start_utc
+            else utc_to.replace(year=utc_to.year - 3)
+        )
+        if utc_from >= utc_to:
+            raise ValueError("mt5.start_utc must be earlier than mt5.end_utc")
+        return utc_from, utc_to
 
     def fetch_rates(self) -> pd.DataFrame:
+        try:
+            import MetaTrader5 as mt5
+        except ImportError as exc:
+            raise RuntimeError(
+                "MetaTrader5 package is not available. Install it or run with mt5.source=csv"
+            ) from exc
+
         self.logger.info("Initializing MT5...")
         if not mt5.initialize():
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
@@ -36,20 +57,26 @@ class MT5Connector:
                 if not authorized:
                     raise RuntimeError(f"MT5 login failed: {mt5.last_error()}")
 
-            timeframe = self._resolve_timeframe()
-            utc_to = datetime.now(timezone.utc)
-            rates = mt5.copy_rates_from(
+            timeframe = self._resolve_timeframe(mt5)
+            utc_from, utc_to = self._resolve_timerange()
+            rates = mt5.copy_rates_range(
                 self.config.symbol,
                 timeframe,
+                utc_from,
                 utc_to,
-                self.config.bars,
             )
             if rates is None or len(rates) == 0:
                 raise RuntimeError(f"No rates returned: {mt5.last_error()}")
 
             df = pd.DataFrame(rates)
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            self.logger.info("Fetched %d bars for %s", len(df), self.config.symbol)
+            self.logger.info(
+                "Fetched %d rows for %s from %s to %s",
+                len(df),
+                self.config.symbol,
+                utc_from.isoformat(),
+                utc_to.isoformat(),
+            )
             return df
         finally:
             mt5.shutdown()
