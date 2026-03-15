@@ -322,14 +322,17 @@ input double InpMinBodyRangeRatio    = 0.60;
 input double InpImpulseMinATR        = 1.8;
 
 input group "=== FVG & OTE ==="
-input bool             InpUseFVG            = true;
-input bool             InpUseOTE            = false;
-input double           InpOTELevel1         = 0.62;
-input double           InpOTELevel2         = 0.79;
-input ENUM_ENTRY_MODE  InpEntryMode         = ENTRY_MID_FVG;
-input int              InpMinFVGSizePoints  = 5;
-input bool             InpAllowPending      = true;
-input int              InpPendingExpiryBars = 6;
+input bool             InpAllowPending         = true;
+input bool             InpAllowPendingBelowFVG = true;
+input ENUM_ENTRY_MODE  InpEntryMode            = ENTRY_MID_FVG;
+input double           InpMaxFVGDistanceATR    = 3.0;
+input int              InpMinFVGSizePoints     = 5;
+input double           InpOTELevel1            = 0.62;
+input double           InpOTELevel2            = 0.79;
+input int              InpPendingExpiryBars    = 6;
+input bool             InpRequireFVGEntryFromTop = false;
+input bool             InpUseFVG               = true;
+input bool             InpUseOTE               = false;
 
 input group "=== SESSION ==="
 input int                InpGMTOffset        = 3; // FIX-3
@@ -1110,25 +1113,135 @@ void BuildTradeFromContext(SetupContext &ctx)
    if(InpUseFVG)
    {
       if(!ctx.fvg.valid) return;
-      double fvgMid=(ctx.fvg.upper + ctx.fvg.lower) * 0.5;
+      double fvgMid = (ctx.fvg.upper + ctx.fvg.lower) * 0.5; // IMP-G2
+
       if(ctx.direction==1)
       {
-         if(InpEntryMode==ENTRY_MID_FVG) entryPrice=fvgMid; else if(InpEntryMode==ENTRY_NEAR_FVG) entryPrice=ctx.fvg.upper; else entryPrice=MathMin(marketPrice,fvgMid);
-         bool inside=(marketPrice>=ctx.fvg.lower && marketPrice<=ctx.fvg.upper), above=(marketPrice>ctx.fvg.upper);
-         if(inside){ entryPrice=marketPrice; usePending=false; } else if(above && InpAllowPending){ usePending=true; } else return;
-         if(usePending && entryPrice >= g_symbol.Ask()) return; // FIX-4
+         double rawEntry = 0; // IMP-G2
+         if(InpEntryMode == ENTRY_MID_FVG)       rawEntry = fvgMid; // IMP-G2
+         else if(InpEntryMode == ENTRY_NEAR_FVG) rawEntry = ctx.fvg.upper; // IMP-G2
+         else                                    rawEntry = fvgMid; // IMP-G2
+
+         bool inside = (ask >= ctx.fvg.lower && ask <= ctx.fvg.upper); // IMP-G2
+         bool above  = (ask >  ctx.fvg.upper); // IMP-G2
+         bool below  = (ask <  ctx.fvg.lower); // IMP-G2
+
+         double atrNow = GetATRValue(1); // IMP-G2
+         bool distanceOK = true; // IMP-G2
+         if(InpMaxFVGDistanceATR > 0 && atrNow > 0) // IMP-G2
+         {
+            double distToFVG = 0; // IMP-G2
+            if(above) distToFVG = ask - ctx.fvg.upper; // IMP-G2
+            if(below) distToFVG = ctx.fvg.lower - ask; // IMP-G2
+            distanceOK = (distToFVG <= atrNow * InpMaxFVGDistanceATR); // IMP-G2
+         }
+
+         if(inside)
+         {
+            if(InpRequireFVGEntryFromTop) // IMP-G2
+            {
+               double prevClose = iClose(_Symbol, InpSignalTF, 2); // IMP-G2
+               if(prevClose < ctx.fvg.upper) return; // IMP-G2
+            }
+            entryPrice = (InpEntryMode == ENTRY_CANDLE_CONFIRM) ? ask : rawEntry; // IMP-G2
+            usePending = false; // IMP-G2
+         }
+         else if(above && InpAllowPending)
+         {
+            if(!distanceOK) return; // IMP-G2
+            entryPrice = rawEntry; // IMP-G2
+            usePending = true; // IMP-G2
+            if(entryPrice >= ask) return; // IMP-G2
+         }
+         else if(below && InpAllowPendingBelowFVG && InpAllowPending)
+         {
+            if(!distanceOK) return; // IMP-G2
+            entryPrice = (InpEntryMode == ENTRY_NEAR_FVG) ? ctx.fvg.upper : fvgMid; // IMP-G2
+            usePending = true; // IMP-G2
+            if(entryPrice >= ask) return; // IMP-G2
+         }
+         else
+            return; // IMP-G2
       }
       else
       {
-         if(InpEntryMode==ENTRY_MID_FVG) entryPrice=fvgMid; else if(InpEntryMode==ENTRY_NEAR_FVG) entryPrice=ctx.fvg.lower; else entryPrice=MathMax(marketPrice,fvgMid);
-         bool inside=(marketPrice>=ctx.fvg.lower && marketPrice<=ctx.fvg.upper), below=(marketPrice<ctx.fvg.lower);
-         if(inside){ entryPrice=marketPrice; usePending=false; } else if(below && InpAllowPending){ usePending=true; } else return;
-         if(usePending && entryPrice <= g_symbol.Bid()) return; // FIX-4
+         double rawEntry = 0; // IMP-G2
+         if(InpEntryMode == ENTRY_MID_FVG)       rawEntry = fvgMid; // IMP-G2
+         else if(InpEntryMode == ENTRY_NEAR_FVG) rawEntry = ctx.fvg.lower; // IMP-G2
+         else                                    rawEntry = fvgMid; // IMP-G2
+
+         bool inside = (bid >= ctx.fvg.lower && bid <= ctx.fvg.upper); // IMP-G2
+         bool above  = (bid >  ctx.fvg.upper); // IMP-G2
+         bool below  = (bid <  ctx.fvg.lower); // IMP-G2
+
+         double atrNow = GetATRValue(1); // IMP-G2
+         bool distanceOK = true; // IMP-G2
+         if(InpMaxFVGDistanceATR > 0 && atrNow > 0) // IMP-G2
+         {
+            double distToFVG = 0; // IMP-G2
+            if(above) distToFVG = bid - ctx.fvg.upper; // IMP-G2
+            if(below) distToFVG = ctx.fvg.lower - bid; // IMP-G2
+            distanceOK = (distToFVG <= atrNow * InpMaxFVGDistanceATR); // IMP-G2
+         }
+
+         if(inside)
+         {
+            if(InpRequireFVGEntryFromTop) // IMP-G2
+            {
+               double prevClose = iClose(_Symbol, InpSignalTF, 2); // IMP-G2
+               if(prevClose > ctx.fvg.lower) return; // IMP-G2
+            }
+            entryPrice = (InpEntryMode == ENTRY_CANDLE_CONFIRM) ? bid : rawEntry; // IMP-G2
+            usePending = false; // IMP-G2
+         }
+         else if(below && InpAllowPending)
+         {
+            if(!distanceOK) return; // IMP-G2
+            entryPrice = rawEntry; // IMP-G2
+            usePending = true; // IMP-G2
+            if(entryPrice <= bid) return; // IMP-G2
+         }
+         else if(above && InpAllowPendingBelowFVG && InpAllowPending)
+         {
+            if(!distanceOK) return; // IMP-G2
+            entryPrice = (InpEntryMode == ENTRY_NEAR_FVG) ? ctx.fvg.lower : fvgMid; // IMP-G2
+            usePending = true; // IMP-G2
+            if(entryPrice <= bid) return; // IMP-G2
+         }
+         else
+            return; // IMP-G2
       }
    }
    else { entryPrice=marketPrice; usePending=false; }
 
-   if(InpUseOTE){ if(!ctx.ote.valid) return; if(entryPrice<ctx.ote.lower || entryPrice>ctx.ote.upper) return; }
+   if(InpUseOTE)
+   {
+      if(!ctx.ote.valid) return; // IMP-G3
+
+      if(InpUseFVG && ctx.fvg.valid) // IMP-G3
+      {
+         double overlapLow  = MathMax(ctx.fvg.lower, ctx.ote.lower); // IMP-G3
+         double overlapHigh = MathMin(ctx.fvg.upper, ctx.ote.upper); // IMP-G3
+
+         if(overlapLow >= overlapHigh) // IMP-G3
+         {
+            WriteDebugLog("Gate3: FVG [" + DoubleToString(ctx.fvg.lower,_Digits) + "," + DoubleToString(ctx.fvg.upper,_Digits) + "] and OTE [" + DoubleToString(ctx.ote.lower,_Digits) + "," + DoubleToString(ctx.ote.upper,_Digits) + "] do not overlap — setup rejected"); // IMP-G3
+            return; // IMP-G3
+         }
+
+         entryPrice = MathMax(overlapLow, MathMin(overlapHigh, entryPrice)); // IMP-G3
+
+         if(usePending) // IMP-G3
+         {
+            if(ctx.direction == 1 && entryPrice >= g_symbol.Ask()) return; // IMP-G3
+            if(ctx.direction ==-1 && entryPrice <= g_symbol.Bid()) return; // IMP-G3
+         }
+      }
+      else
+      {
+         if(entryPrice < ctx.ote.lower || entryPrice > ctx.ote.upper) return; // IMP-G3
+      }
+   }
 
    double buf=InpSLBufferPoints*_Point; double sl=0;
    if(ctx.direction==1){ sl=NormalizePrice(MathMin(ctx.sweep.sweepLow-buf, ctx.displacement.impulseStart-buf)); entryPrice=NormalizePrice(entryPrice); if(entryPrice<=sl) return; }
@@ -1144,6 +1257,7 @@ void BuildTradeFromContext(SetupContext &ctx)
    ctx.trade.reason=BuildReasonText(ctx); ctx.trade.execType=(usePending?EXEC_PENDING_LIMIT:EXEC_MARKET);
    ctx.trade.expiryTime=iTime(_Symbol, InpSignalTF, 0) + PeriodSeconds(InpSignalTF) * InpPendingExpiryBars;
 }
+
 
 //============================================================
 // VALIDATION, EXECUTION, MANAGEMENT, VISUALIZATION
