@@ -66,10 +66,17 @@ def export_artifacts(
     with open(feature_meta_path, "w", encoding="utf-8") as f:
         json.dump(feature_names_meta, f, ensure_ascii=False, indent=2)
 
+    n_features_main = report.get("n_features_main", report.get("n_features_buy"))
+    n_features_meta = report.get("n_features_meta", report.get("n_features_sell"))
+    if n_features_main is None:
+        n_features_main = report.get("feature_counts", {}).get("selected", len(feature_names))
+    if n_features_meta is None:
+        n_features_meta = report.get("feature_counts", {}).get("selected", len(feature_names_meta))
+
     mqh = f'''#define MODEL_MAIN_PATH   "{os.path.basename(main_onnx)}"
 #define MODEL_META_PATH   "{os.path.basename(meta_onnx)}"
-#define N_FEATURES        {report["n_features_main"]}
-#define N_FEATURES_META   {report["n_features_meta"]}
+#define N_FEATURES        {int(n_features_main)}
+#define N_FEATURES_META   {int(n_features_meta)}
 #define N_PERIODS         {len(periods)}
 #define N_PERIODS_META    {len(periods_meta)}
 #define DECISION_THRESHOLD {decision_threshold:.6f}
@@ -94,6 +101,9 @@ int PeriodsMeta[{len(periods_meta)}]  = {{{", ".join(map(str, periods_meta))}}};
         "scaler_meta": _scaler_dict(scaler_meta),
         "feature_names_main": feature_names,
         "feature_names_meta": feature_names_meta,
+        "buy_feature_names": report.get("buy_feature_names", feature_names),
+        "sell_feature_names": report.get("sell_feature_names", feature_names_meta),
+        "model_type": report.get("model_type", "dual_edge"),
         "onnx_main_validation": onnx_check_main,
         "onnx_meta_validation": onnx_check_meta,
     }
