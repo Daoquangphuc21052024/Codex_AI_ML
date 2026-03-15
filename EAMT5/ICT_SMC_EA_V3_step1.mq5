@@ -128,6 +128,7 @@ struct MarketStructure
    int                 direction;
    bool                valid;
    int                 breakBar;
+   double              breakBodySize;   // IMP-4
    int                 sourceTier;
    datetime            sourceSwingTime;
    double              sourceSwingPrice;
@@ -301,14 +302,18 @@ input ENUM_TIMEFRAMES InpSignalTF = PERIOD_M15;
 input ENUM_TIMEFRAMES InpBiasTF   = PERIOD_H1;
 
 input group "=== SWING & STRUCTURE ==="
-input int InpSwingLeft            = 3;
-input int InpSwingRight           = 3;
-input int InpEqualTolerancePoints = 5;
-input int InpMaxSwingsToKeep      = 40;
-input int InpMSSLookbackBars      = 8;
-input int InpSetupExpiryBars      = 10;
-input int InpSweepExpiryBars      = 4;
-input int InpDisplacementMaxBars  = 3;
+input int    InpDisplacementMaxBars  = 3;
+input bool   InpAllowBOSEntry        = false; // IMP-1
+input int    InpEqualTolerancePoints = 5;
+input int    InpMaxSwingsToKeep      = 40;
+input int    InpMSSLookbackBars      = 8;
+input bool   InpRequireCHoCH         = true; // IMP-1
+input int    InpSetupExpiryBars      = 10;
+input int    InpSweepExpiryBars      = 4;
+input int    InpSweepLookbackBars    = 3; // IMP-3
+input double InpStructMinBodyATR     = 0.3; // IMP-1
+input int    InpSwingLeft            = 3;
+input int    InpSwingRight           = 3;
 
 input group "=== DISPLACEMENT ==="
 input int    InpATRPeriod            = 14;
@@ -817,13 +822,15 @@ void DetectMarketStructure()
 
    if(hasInternalHigh && close1 > internalHigh.price)
    {
-      g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalHigh.price; g_lastStructure.direction=1; g_lastStructure.breakBar=1; g_lastStructure.sourceTier=SWING_INTERNAL;
+      g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalHigh.price; g_lastStructure.direction=1; g_lastStructure.breakBar=1; g_lastStructure.breakBodySize=MathAbs(iClose(_Symbol, InpSignalTF, 1) - iOpen(_Symbol, InpSignalTF, 1)); // IMP-4
+      g_lastStructure.sourceTier=SWING_INTERNAL;
       g_lastStructure.sourceSwingTime=internalHigh.time; g_lastStructure.sourceSwingPrice=internalHigh.price;
       g_lastStructure.type=(internalTrend==-1?STRUCT_CHOCH:STRUCT_BOS); MarkSwingBroken(SWING_INTERNAL,internalHigh.time,true); return;
    }
    if(hasInternalLow && close1 < internalLow.price)
    {
-      g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalLow.price; g_lastStructure.direction=-1; g_lastStructure.breakBar=1; g_lastStructure.sourceTier=SWING_INTERNAL;
+      g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalLow.price; g_lastStructure.direction=-1; g_lastStructure.breakBar=1; g_lastStructure.breakBodySize=MathAbs(iClose(_Symbol, InpSignalTF, 1) - iOpen(_Symbol, InpSignalTF, 1)); // IMP-4
+      g_lastStructure.sourceTier=SWING_INTERNAL;
       g_lastStructure.sourceSwingTime=internalLow.time; g_lastStructure.sourceSwingPrice=internalLow.price;
       g_lastStructure.type=(internalTrend==1?STRUCT_CHOCH:STRUCT_BOS); MarkSwingBroken(SWING_INTERNAL,internalLow.time,false); return;
    }
@@ -832,21 +839,70 @@ void DetectMarketStructure()
 void DetectLiquiditySweep()
 {
    g_lastSweep.valid=false;
-   if(!IsValidShift(InpSignalTF,1)) return;
-   double high1=iHigh(_Symbol,InpSignalTF,1), low1=iLow(_Symbol,InpSignalTF,1), open1=iOpen(_Symbol,InpSignalTF,1), close1=iClose(_Symbol,InpSignalTF,1);
-   double range1=high1-low1, body1=MathAbs(close1-open1); datetime time1=iTime(_Symbol,InpSignalTF,1); double tol=InpEqualTolerancePoints*_Point;
-   SwingPoint extLow,extHigh; bool hasExtLow=GetLastUnbrokenSwing(SWING_EXTERNAL,false,extLow), hasExtHigh=GetLastUnbrokenSwing(SWING_EXTERNAL,true,extHigh);
+   double tol=InpEqualTolerancePoints*_Point;
 
-   // Future extension point: aggregate equal highs/lows into LiquidityPool here.
-   if(hasExtLow)
+   SwingPoint extLow,extHigh;
+   bool hasExtLow=GetLastUnbrokenSwing(SWING_EXTERNAL,false,extLow);
+   bool hasExtHigh=GetLastUnbrokenSwing(SWING_EXTERNAL,true,extHigh);
+
+   for(int shift = 1; shift <= InpSweepLookbackBars; shift++) // IMP-3
    {
-      bool wickBelow=(low1<extLow.price-tol), closeBackIn=(close1>extLow.price), rejection=(range1>0 && body1/range1>=0.40 && close1>(low1+range1*0.45));
-      if(wickBelow && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extLow.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; g_lastSweep.sourceSwingTime=extLow.time; g_lastSweep.sourceSwingPrice=extLow.price; return; }
-   }
-   if(hasExtHigh)
-   {
-      bool wickAbove=(high1>extHigh.price+tol), closeBackIn=(close1<extHigh.price), rejection=(range1>0 && body1/range1>=0.40 && close1<(high1-range1*0.45));
-      if(wickAbove && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extHigh.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=-1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; g_lastSweep.sourceSwingTime=extHigh.time; g_lastSweep.sourceSwingPrice=extHigh.price; return; }
+      if(!IsValidShift(InpSignalTF, shift)) continue; // IMP-3
+
+      double high_s=iHigh(_Symbol,InpSignalTF,shift); // IMP-3
+      double low_s=iLow(_Symbol,InpSignalTF,shift); // IMP-3
+      double open_s=iOpen(_Symbol,InpSignalTF,shift); // IMP-3
+      double close_s=iClose(_Symbol,InpSignalTF,shift); // IMP-3
+      datetime time_s=iTime(_Symbol,InpSignalTF,shift); // IMP-3
+      double range_s=high_s-low_s; // IMP-3
+      double body_s=MathAbs(close_s-open_s); // IMP-3
+
+      // Future extension point: aggregate equal highs/lows into LiquidityPool here.
+      if(hasExtLow)
+      {
+         bool wickBelow=(low_s<extLow.price-tol);
+         bool closeBackIn=(close_s>extLow.price);
+         bool rejection=(range_s>0 && body_s/range_s>=0.40 && close_s>(low_s+range_s*0.45));
+
+         if(wickBelow && closeBackIn)
+         {
+            g_lastSweep.valid=true;
+            g_lastSweep.time=time_s;
+            g_lastSweep.liquidityLevel=extLow.price;
+            g_lastSweep.sweepLow=low_s;
+            g_lastSweep.sweepHigh=high_s;
+            g_lastSweep.direction=1;
+            g_lastSweep.barIndex=shift; // IMP-3
+            g_lastSweep.tier=SWING_EXTERNAL;
+            g_lastSweep.rejectionStrong=rejection;
+            g_lastSweep.sourceSwingTime=extLow.time;
+            g_lastSweep.sourceSwingPrice=extLow.price;
+            return;
+         }
+      }
+
+      if(hasExtHigh)
+      {
+         bool wickAbove=(high_s>extHigh.price+tol);
+         bool closeBackIn=(close_s<extHigh.price);
+         bool rejection=(range_s>0 && body_s/range_s>=0.40 && close_s<(high_s-range_s*0.45));
+
+         if(wickAbove && closeBackIn)
+         {
+            g_lastSweep.valid=true;
+            g_lastSweep.time=time_s;
+            g_lastSweep.liquidityLevel=extHigh.price;
+            g_lastSweep.sweepLow=low_s;
+            g_lastSweep.sweepHigh=high_s;
+            g_lastSweep.direction=-1;
+            g_lastSweep.barIndex=shift; // IMP-3
+            g_lastSweep.tier=SWING_EXTERNAL;
+            g_lastSweep.rejectionStrong=rejection;
+            g_lastSweep.sourceSwingTime=extHigh.time;
+            g_lastSweep.sourceSwingPrice=extHigh.price;
+            return;
+         }
+      }
    }
 }
 
@@ -958,13 +1014,31 @@ void UpdateSetupContext(SetupContext &ctx)
          break;
 
       case SETUP_SWEEP_CONFIRMED:
+      {
          if(IsContextExpired(ctx, InpSweepExpiryBars)){ InvalidateSetupContext(ctx, INVALID_TIMEOUT_SWEEP, "No structure shift after sweep"); break; }
-         if(g_lastStructure.valid && g_lastStructure.direction==ctx.direction && g_lastStructure.time>=ctx.sweep.time)
+         bool structTypeOK = false; // IMP-2
+         if(g_lastStructure.type == STRUCT_CHOCH) structTypeOK = true; // IMP-2
+         if(InpAllowBOSEntry && g_lastStructure.type == STRUCT_BOS) structTypeOK = true; // IMP-2
+         if(!InpRequireCHoCH) structTypeOK = true; // IMP-2
+         double structBody = g_lastStructure.breakBodySize; // IMP-2
+         if(g_lastStructure.breakBar >= 0) // IMP-2
+            structBody = MathAbs(iClose(_Symbol, InpSignalTF, g_lastStructure.breakBar) - iOpen(_Symbol, InpSignalTF, g_lastStructure.breakBar)); // IMP-2
+         double structATR  = GetATRValue(g_lastStructure.breakBar); // IMP-2
+         bool structMomentumOK = (structATR <= 0) || (structBody >= structATR * InpStructMinBodyATR); // IMP-2
+         bool structAfterSweep = (g_lastStructure.breakBar < ctx.sweep.barIndex); // IMP-2
+         if(g_lastStructure.valid
+            && g_lastStructure.direction==ctx.direction
+            && g_lastStructure.time>=ctx.sweep.time
+            && structTypeOK
+            && structMomentumOK
+            && structAfterSweep)  // FIX-IMP2 // IMP-2
          {
             ctx.structure=g_lastStructure;
             MoveSetupState(ctx, SETUP_SHIFT_CONFIRMED);
+            WriteDebugLog("Structure confirmed: " + StructureTypeToString(ctx.structure.type) + " body=" + DoubleToString(ctx.structure.breakBodySize, _Digits) + " ATR=" + DoubleToString(GetATRValue(ctx.structure.breakBar), _Digits)); // IMP-5
          }
          break;
+      }
 
       case SETUP_SHIFT_CONFIRMED:
          if(IsContextExpired(ctx, InpSetupExpiryBars)){ InvalidateSetupContext(ctx, INVALID_TIMEOUT_SHIFT, "No displacement after shift"); break; }
