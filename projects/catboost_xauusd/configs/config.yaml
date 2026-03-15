@@ -1,4 +1,4 @@
-# schema_version: 0.5.0
+# schema_version: 0.6.0
 mt5:
   source: "mt5"
   symbol: "XAUUSD"
@@ -16,6 +16,9 @@ labeling:
   tp_points: [2.0, 3.0, 5.0]
   sl_points: [2.0, 3.0, 5.0]
   tie_breaker: "sl_priority"
+  entry_mode: "next_open"
+  min_move_atr: 0.8
+  dominance_threshold: 0.15
 
 features:
   max_features: 15
@@ -32,6 +35,13 @@ train:
   tuning_trials: 12
   iterations: 500
   threshold_no_trade: 0.55
+
+backtest:
+  spread_points: 0.15
+  slippage_points: 0.05
+  commission_points: 0.02
+  risk_per_trade: 0.01
+  min_confidence: 0.40
 
 paths:
   raw_data: "projects/catboost_xauusd/data/raw_xauusd_h1.csv"

@@ -13,6 +13,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
 )
 
 from .config import FeatureConfig, TrainConfig
@@ -28,6 +29,7 @@ class FoldResult:
     weighted_f1: float
     macro_f1: float
     balanced_acc: float
+    mcc: float
     overfit_gap: float
     confusion: np.ndarray
     report: dict
@@ -37,6 +39,8 @@ class FoldResult:
     min_side_prob: float
     side_gap: float
     selected_features: list[str]
+    pred_distribution: dict[int, float]
+    actual_distribution: dict[int, float]
 
 
 def _compute_class_weights(y_train: pd.Series) -> list[float]:
@@ -46,14 +50,9 @@ def _compute_class_weights(y_train: pd.Series) -> list[float]:
     return [total / (len(classes) * float(counts.get(cls, 1.0))) for cls in classes]
 
 
-def _select_fold_features(
-    x_train: pd.DataFrame,
-    y_train: pd.Series,
-    candidate_features: list[str],
-    feat_cfg: FeatureConfig,
-) -> list[str]:
-    local = x_train[candidate_features].copy()
-    valid = [col for col in candidate_features if local[col].std(ddof=0) > 1e-12]
+def _select_fold_features(x_train: pd.DataFrame, y_train: pd.Series, candidates: list[str], feat_cfg: FeatureConfig) -> list[str]:
+    local = x_train[candidates].copy()
+    valid = [c for c in candidates if local[c].std(ddof=0) > 1e-12]
     if not valid:
         raise ValueError("No valid features left after variance filter")
 
@@ -65,7 +64,7 @@ def _select_fold_features(
     for feature, _ in ranked:
         if len(selected) >= feat_cfg.max_features:
             break
-        if all(corr.loc[feature, picked] < feat_cfg.corr_threshold for picked in selected):
+        if all(corr.loc[feature, kept] < feat_cfg.corr_threshold for kept in selected):
             selected.append(feature)
 
     if len(selected) < min(3, len(valid)):
@@ -78,12 +77,7 @@ def _select_fold_features(
     return selected[: feat_cfg.max_features]
 
 
-def _decode_predictions(
-    probs: np.ndarray,
-    no_trade_threshold: float,
-    min_side_prob: float,
-    side_gap: float,
-) -> np.ndarray:
+def _decode_predictions(probs: np.ndarray, no_trade_threshold: float, min_side_prob: float, side_gap: float) -> np.ndarray:
     p0, p1, p2 = probs[:, 0], probs[:, 1], probs[:, 2]
     side = np.where(p1 >= p2, 1, 2)
     side_prob = np.maximum(p1, p2)
@@ -93,11 +87,7 @@ def _decode_predictions(
 
 
 def _optimize_decision_thresholds(y_true: pd.Series, probs: np.ndarray, base_threshold: float) -> dict[str, float]:
-    best = {
-        "no_trade_threshold": float(np.clip(base_threshold, 0.30, 0.80)),
-        "min_side_prob": 0.38,
-        "side_gap": 0.03,
-    }
+    best = {"no_trade_threshold": float(np.clip(base_threshold, 0.30, 0.80)), "min_side_prob": 0.38, "side_gap": 0.03}
     best_score = -1e9
 
     no_trade_grid = sorted(
@@ -117,11 +107,8 @@ def _optimize_decision_thresholds(y_true: pd.Series, probs: np.ndarray, base_thr
                 macro = f1_score(y_true, pred, average="macro", zero_division=0)
                 bal = balanced_accuracy_score(y_true, pred)
                 pred_share = pd.Series(pred).value_counts(normalize=True)
-                collapse_penalty = 0.0
-                for cls in [0, 1, 2]:
-                    if pred_share.get(cls, 0.0) < 0.05:
-                        collapse_penalty += 0.05
-                score = 0.65 * macro + 0.35 * bal - collapse_penalty
+                collapse_penalty = sum(0.05 for cls in [0, 1, 2] if pred_share.get(cls, 0.0) < 0.05)
+                score = 0.60 * macro + 0.30 * bal + 0.10 * matthews_corrcoef(y_true, pred) - collapse_penalty
                 if score > best_score:
                     best_score = score
                     best = {"no_trade_threshold": nt, "min_side_prob": min_side, "side_gap": gap}
@@ -135,9 +122,8 @@ def tune_hyperparameters(
     y_val: pd.Series,
     cfg: TrainConfig,
 ) -> tuple[dict, dict[str, float], list[float]]:
-    candidates: list[dict] = []
     class_weights = _compute_class_weights(y_train)
-
+    candidates: list[dict] = []
     for d in [4, 5, 6]:
         for lr in [0.02, 0.05, 0.08]:
             for l2 in [3, 5, 7]:
@@ -160,15 +146,8 @@ def tune_hyperparameters(
         model.fit(x_train, y_train, eval_set=(x_val, y_val), use_best_model=True)
         val_probs = model.predict_proba(x_val)
         decision_cfg = _optimize_decision_thresholds(y_val, val_probs, cfg.threshold_no_trade)
-        pred = _decode_predictions(
-            val_probs,
-            decision_cfg["no_trade_threshold"],
-            decision_cfg["min_side_prob"],
-            decision_cfg["side_gap"],
-        )
-        macro = f1_score(y_val, pred, average="macro", zero_division=0)
-        bal = balanced_accuracy_score(y_val, pred)
-        score = 0.65 * macro + 0.35 * bal
+        pred = _decode_predictions(val_probs, **decision_cfg)
+        score = 0.60 * f1_score(y_val, pred, average="macro", zero_division=0) + 0.30 * balanced_accuracy_score(y_val, pred) + 0.10 * matthews_corrcoef(y_val, pred)
         scored.append((score, params, decision_cfg))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -191,7 +170,6 @@ def train_walk_forward(
     for fold in folds:
         x_train_full = df.loc[fold.train_idx, candidate_features]
         y_train = df.loc[fold.train_idx, "label"]
-
         selected = _select_fold_features(x_train_full, y_train, candidate_features, feat_cfg)
 
         x_train = df.loc[fold.train_idx, selected]
@@ -202,31 +180,28 @@ def train_walk_forward(
 
         best_params, decision_cfg, class_weights = tune_hyperparameters(x_train, y_train, x_val, y_val, cfg)
         best_params["class_weights"] = class_weights
+
         model = CatBoostClassifier(**best_params)
         model.fit(x_train, y_train, eval_set=(x_val, y_val), use_best_model=True)
 
-        train_probs = model.predict_proba(x_train)
-        val_probs = model.predict_proba(x_val)
+        train_pred = _decode_predictions(model.predict_proba(x_train), **decision_cfg)
+        val_pred = _decode_predictions(model.predict_proba(x_val), **decision_cfg)
         test_probs = model.predict_proba(x_test)
-
-        train_pred = _decode_predictions(train_probs, **decision_cfg)
-        val_pred = _decode_predictions(val_probs, **decision_cfg)
         test_pred = _decode_predictions(test_probs, **decision_cfg)
 
-        train_acc = accuracy_score(y_train, train_pred)
-        val_acc = accuracy_score(y_val, val_pred)
-        test_acc = accuracy_score(y_test, test_pred)
-        overfit_gap = train_acc - val_acc
+        actual_distribution = {int(k): float(v) for k, v in y_test.value_counts(normalize=True).to_dict().items()}
+        pred_distribution = {int(k): float(v) for k, v in pd.Series(test_pred).value_counts(normalize=True).to_dict().items()}
 
         result = FoldResult(
             fold=fold.fold,
-            train_acc=train_acc,
-            val_acc=val_acc,
-            test_acc=test_acc,
+            train_acc=accuracy_score(y_train, train_pred),
+            val_acc=accuracy_score(y_val, val_pred),
+            test_acc=accuracy_score(y_test, test_pred),
             weighted_f1=f1_score(y_test, test_pred, average="weighted", zero_division=0),
             macro_f1=f1_score(y_test, test_pred, average="macro", zero_division=0),
             balanced_acc=balanced_accuracy_score(y_test, test_pred),
-            overfit_gap=overfit_gap,
+            mcc=matthews_corrcoef(y_test, test_pred),
+            overfit_gap=accuracy_score(y_train, train_pred) - accuracy_score(y_val, val_pred),
             confusion=confusion_matrix(y_test, test_pred, labels=[0, 1, 2]),
             report=classification_report(y_test, test_pred, output_dict=True, zero_division=0),
             test_probs=test_probs,
@@ -235,27 +210,24 @@ def train_walk_forward(
             min_side_prob=decision_cfg["min_side_prob"],
             side_gap=decision_cfg["side_gap"],
             selected_features=selected,
+            pred_distribution=pred_distribution,
+            actual_distribution=actual_distribution,
         )
         fold_results.append(result)
 
-        class_mix = pd.Series(test_pred).value_counts(normalize=True).to_dict()
         logger.info(
-            "Fold %d | train_acc=%.4f val_acc=%.4f test_acc=%.4f macro_f1=%.4f bal_acc=%.4f overfit_gap=%.4f | thr(no_trade=%.2f,min_side=%.2f,gap=%.2f) | pred_mix=%s | n_feat=%d",
-            fold.fold,
-            train_acc,
-            val_acc,
-            test_acc,
+            "Fold %d | test_acc=%.4f macro_f1=%.4f bal_acc=%.4f mcc=%.4f | pred_dist=%s actual_dist=%s",
+            result.fold,
+            result.test_acc,
             result.macro_f1,
             result.balanced_acc,
-            overfit_gap,
-            result.no_trade_threshold,
-            result.min_side_prob,
-            result.side_gap,
-            {int(k): round(float(v), 3) for k, v in class_mix.items()},
-            len(selected),
+            result.mcc,
+            {k: round(v, 3) for k, v in result.pred_distribution.items()},
+            {k: round(v, 3) for k, v in result.actual_distribution.items()},
         )
 
         fold_pred_df = df.loc[fold.test_idx, ["time", "open", "high", "low", "close", "label"]].copy()
+        fold_pred_df["source_index"] = fold.test_idx
         fold_pred_df["pred"] = test_pred.astype(int)
         fold_pred_df["signal"] = test_pred.astype(int)
         fold_pred_df["prob_0"] = test_probs[:, 0]

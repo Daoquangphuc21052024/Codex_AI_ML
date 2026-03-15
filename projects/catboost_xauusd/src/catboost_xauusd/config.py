@@ -27,6 +27,9 @@ class LabelingConfig:
     tp_points: list[float]
     sl_points: list[float]
     tie_breaker: str
+    entry_mode: str
+    min_move_atr: float
+    dominance_threshold: float
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,15 @@ class TrainConfig:
 
 
 @dataclass(frozen=True)
+class BacktestConfig:
+    spread_points: float
+    slippage_points: float
+    commission_points: float
+    risk_per_trade: float
+    min_confidence: float
+
+
+@dataclass(frozen=True)
 class PathsConfig:
     raw_data: str
     reports_dir: str
@@ -63,6 +75,7 @@ class AppConfig:
     labeling: LabelingConfig
     features: FeatureConfig
     train: TrainConfig
+    backtest: BacktestConfig
     paths: PathsConfig
 
 
@@ -80,7 +93,6 @@ def resolve_config_path(config_path: str | Path) -> Path:
         project_root / "configs" / "config.yaml",
         project_root / "config.yaml",
     ]
-
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -95,8 +107,6 @@ def resolve_config_path(config_path: str | Path) -> Path:
     )
 
 
-
-
 def _reject_legacy_keys(raw: dict[str, Any]) -> None:
     mt5_legacy = [k for k in ["bars"] if k in raw.get("mt5", {})]
     train_legacy = [k for k in ["min_train_size", "val_size", "test_size"] if k in raw.get("train", {})]
@@ -104,8 +114,9 @@ def _reject_legacy_keys(raw: dict[str, Any]) -> None:
         raise ValueError(
             "Detected legacy config keys from v0.1.x that are no longer supported. "
             f"mt5 legacy keys: {mt5_legacy or 'none'}, train legacy keys: {train_legacy or 'none'}. "
-            "Please migrate to v0.5.0 config schema using start_utc/end_utc and day-based walk-forward windows."
+            "Please migrate to v0.6.0 config schema using start_utc/end_utc and day-based walk-forward windows."
         )
+
 
 def load_config(config_path: str | Path) -> AppConfig:
     resolved = resolve_config_path(config_path)
@@ -119,5 +130,6 @@ def load_config(config_path: str | Path) -> AppConfig:
         labeling=LabelingConfig(**raw["labeling"]),
         features=FeatureConfig(**raw["features"]),
         train=TrainConfig(**raw["train"]),
+        backtest=BacktestConfig(**raw["backtest"]),
         paths=PathsConfig(**raw["paths"]),
     )
