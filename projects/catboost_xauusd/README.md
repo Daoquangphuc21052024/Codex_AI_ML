@@ -87,8 +87,7 @@ Edit `configs/config.yaml`:
 ### Smoke test (không cần MT5)
 
 ```bash
-export PYTHONPATH=/workspace/Codex_AI_ML/projects/catboost_xauusd/src
-python projects/catboost_xauusd/scripts/smoke_test_csv.py
+python scripts/smoke_test_csv.py
 ```
 
 Script sẽ tạo dữ liệu synthetic OHLCV, chạy full pipeline, và assert các artifact quan trọng (ONNX/schema/report) đã được sinh ra.
@@ -96,7 +95,6 @@ Script sẽ tạo dữ liệu synthetic OHLCV, chạy full pipeline, và assert 
 ## Run
 
 ```bash
-export PYTHONPATH=/workspace/Codex_AI_ML/projects/catboost_xauusd/src
 python run_pipeline.py --config configs/config.yaml
 ```
 
