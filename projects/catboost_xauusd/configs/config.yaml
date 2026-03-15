@@ -1,0 +1,50 @@
+# schema_version: 0.6.0
+mt5:
+  source: "mt5"
+  symbol: "XAUUSD"
+  timeframe: "H1"
+  timezone: "UTC"
+  start_utc: "2021-01-01T00:00:00Z"
+  end_utc: null
+  login: null
+  password: null
+  server: null
+  csv_path: null
+
+labeling:
+  horizon_bars: 12
+  tp_points: [2.0, 3.0, 5.0]
+  sl_points: [2.0, 3.0, 5.0]
+  tie_breaker: "sl_priority"
+  entry_mode: "next_open"
+  min_move_atr: 0.8
+  dominance_threshold: 0.15
+
+features:
+  max_features: 15
+  windows: [6, 12, 24]
+  corr_threshold: 0.85
+
+train:
+  n_splits: 5
+  min_train_days: 180
+  val_days: 30
+  test_days: 30
+  step_days: 30
+  random_state: 42
+  tuning_trials: 12
+  iterations: 500
+  threshold_no_trade: 0.55
+
+backtest:
+  spread_points: 0.15
+  slippage_points: 0.05
+  commission_points: 0.02
+  risk_per_trade: 0.01
+  min_confidence: 0.40
+
+paths:
+  raw_data: "projects/catboost_xauusd/data/raw_xauusd_h1.csv"
+  reports_dir: "projects/catboost_xauusd/reports"
+  artifacts_dir: "projects/catboost_xauusd/artifacts"
+  logs_dir: "projects/catboost_xauusd/logs"
