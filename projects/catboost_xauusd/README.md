@@ -1,6 +1,6 @@
 # CatBoost XAUUSD H1 MT5 Pipeline (Production-style)
 
-End-to-end Python project (v0.3.0) for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
+End-to-end Python project (v0.4.0) for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
 
 ## Objectives
 
@@ -50,7 +50,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Schema update (v0.3.0 - bắt buộc)
+## Schema update (v0.4.0 - bắt buộc)
 
 Pipeline hiện chỉ hỗ trợ schema mới theo **time-range time series**.
 Các key cũ đã bị chặn cứng (không cho chạy):
@@ -72,6 +72,14 @@ mt5:
   server: null
   csv_path: null
 ```
+
+
+## v0.4.0 improvements from live test feedback
+
+- Added **class-weighted CatBoost** per fold to reduce class collapse.
+- Added **validation-based threshold optimization** for final class decision (`no_trade_threshold`, `min_side_prob`, `side_gap`) to avoid always predicting one side.
+- Added robust metrics per fold: `macro_f1`, `balanced_acc`, plus decision thresholds stored in `fold_metrics.csv`.
+- Silenced sklearn undefined precision warnings correctly via `zero_division=0` in reports/F1 computation.
 
 ## Configuration
 

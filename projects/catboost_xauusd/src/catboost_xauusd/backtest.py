@@ -6,11 +6,15 @@ import pandas as pd
 
 def run_backtest(pred_df: pd.DataFrame, threshold_no_trade: float) -> pd.DataFrame:
     out = pred_df.copy()
-    signal = np.where(
-        out["prob_0"] >= threshold_no_trade,
-        0,
-        np.where(out["prob_1"] >= out["prob_2"], 1, 2),
-    )
+
+    if "signal" in out.columns:
+        signal = out["signal"].astype(int).to_numpy()
+    else:
+        signal = np.where(
+            out["prob_0"] >= threshold_no_trade,
+            0,
+            np.where(out["prob_1"] >= out["prob_2"], 1, 2),
+        )
     out["signal"] = signal
 
     ret = out["close"].pct_change().fillna(0.0)

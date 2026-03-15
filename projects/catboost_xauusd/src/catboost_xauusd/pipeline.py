@@ -72,7 +72,12 @@ def run(config_path: str) -> None:
                 "val_acc": fr.val_acc,
                 "test_acc": fr.test_acc,
                 "weighted_f1": fr.weighted_f1,
+                "macro_f1": fr.macro_f1,
+                "balanced_acc": fr.balanced_acc,
                 "overfit_gap": fr.overfit_gap,
+                "no_trade_threshold": fr.no_trade_threshold,
+                "min_side_prob": fr.min_side_prob,
+                "side_gap": fr.side_gap,
             }
             for fr in fold_results
         ]

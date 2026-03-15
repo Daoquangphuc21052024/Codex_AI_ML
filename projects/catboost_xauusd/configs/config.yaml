@@ -1,4 +1,4 @@
-# schema_version: 0.3.0
+# schema_version: 0.4.0
 mt5:
   source: "mt5"
   symbol: "XAUUSD"
