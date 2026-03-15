@@ -25,8 +25,15 @@ def _safe_pr_auc(y_true: pd.Series, y_prob: np.ndarray) -> float:
     return float(average_precision_score(y_true, y_prob)) if len(np.unique(y_true)) > 1 else 0.0
 
 
+def _calibration_points(y_true: pd.Series, y_prob: np.ndarray, bins: int = 10) -> list[dict]:
+    calib = pd.DataFrame({"prob": y_prob, "target": y_true.to_numpy()})
+    calib["bin"] = pd.qcut(calib["prob"], q=bins, duplicates="drop")
+    grp = calib.groupby("bin", observed=True).agg(prob_mean=("prob", "mean"), target_rate=("target", "mean"), n=("target", "size"))
+    grp = grp.reset_index(drop=True)
+    return grp.to_dict(orient="records")
+
+
 def classification_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Compatibility helper for legacy search module."""
     y_pred = (y_prob >= threshold).astype(int)
     metrics = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -48,12 +55,6 @@ def evaluate_dual_classification(
 ) -> dict:
     pred_buy = (prob_buy >= buy_threshold).astype(int)
     pred_sell = (prob_sell >= sell_threshold).astype(int)
-    buy_precision = float(precision_score(y_buy, pred_buy, zero_division=0))
-    buy_recall = float(recall_score(y_buy, pred_buy, zero_division=0))
-    buy_f1 = float(f1_score(y_buy, pred_buy, zero_division=0))
-    sell_precision = float(precision_score(y_sell, pred_sell, zero_division=0))
-    sell_recall = float(recall_score(y_sell, pred_sell, zero_division=0))
-    sell_f1 = float(f1_score(y_sell, pred_sell, zero_division=0))
 
     return {
         "auc_buy": _safe_auc(y_buy, prob_buy),
@@ -62,16 +63,22 @@ def evaluate_dual_classification(
         "pr_auc_sell": _safe_pr_auc(y_sell, prob_sell),
         "brier_buy": float(brier_score_loss(y_buy, prob_buy)),
         "brier_sell": float(brier_score_loss(y_sell, prob_sell)),
-        "precision_buy": buy_precision,
-        "recall_buy": buy_recall,
-        "f1_buy": buy_f1,
-        "precision_sell": sell_precision,
-        "recall_sell": sell_recall,
-        "f1_sell": sell_f1,
+        "precision_buy": float(precision_score(y_buy, pred_buy, zero_division=0)),
+        "recall_buy": float(recall_score(y_buy, pred_buy, zero_division=0)),
+        "f1_buy": float(f1_score(y_buy, pred_buy, zero_division=0)),
+        "precision_sell": float(precision_score(y_sell, pred_sell, zero_division=0)),
+        "recall_sell": float(recall_score(y_sell, pred_sell, zero_division=0)),
+        "f1_sell": float(f1_score(y_sell, pred_sell, zero_division=0)),
         "predicted_positive_rate_buy": float(pred_buy.mean()),
         "predicted_positive_rate_sell": float(pred_sell.mean()),
         "confusion_buy": confusion_matrix(y_buy, pred_buy, labels=[0, 1]).tolist(),
         "confusion_sell": confusion_matrix(y_sell, pred_sell, labels=[0, 1]).tolist(),
+        "buy_prob_mean_when_positive": float(prob_buy[y_buy.to_numpy() == 1].mean()) if (y_buy == 1).any() else 0.0,
+        "buy_prob_mean_when_negative": float(prob_buy[y_buy.to_numpy() == 0].mean()) if (y_buy == 0).any() else 0.0,
+        "sell_prob_mean_when_positive": float(prob_sell[y_sell.to_numpy() == 1].mean()) if (y_sell == 1).any() else 0.0,
+        "sell_prob_mean_when_negative": float(prob_sell[y_sell.to_numpy() == 0].mean()) if (y_sell == 0).any() else 0.0,
+        "calibration_buy": _calibration_points(y_buy, prob_buy),
+        "calibration_sell": _calibration_points(y_sell, prob_sell),
         "buy_threshold": float(buy_threshold),
         "sell_threshold": float(sell_threshold),
     }
@@ -100,7 +107,6 @@ def optimize_threshold(
     min_positive_rate: float = 0.2,
     max_positive_rate: float = 0.8,
 ) -> tuple[float, dict]:
-    # compatibility helper kept for old callers
     if thresholds is None:
         thresholds = [round(x, 3) for x in np.arange(0.3, 0.8, 0.01)]
     rows = []

@@ -66,8 +66,8 @@ def export_artifacts(
     with open(feature_meta_path, "w", encoding="utf-8") as f:
         json.dump(feature_names_meta, f, ensure_ascii=False, indent=2)
 
-    n_features_main = report.get("n_features_main")
-    n_features_meta = report.get("n_features_meta")
+    n_features_main = report.get("n_features_main", report.get("n_features_buy"))
+    n_features_meta = report.get("n_features_meta", report.get("n_features_sell"))
     if n_features_main is None:
         n_features_main = report.get("feature_counts", {}).get("selected", len(feature_names))
     if n_features_meta is None:
@@ -101,6 +101,9 @@ int PeriodsMeta[{len(periods_meta)}]  = {{{", ".join(map(str, periods_meta))}}};
         "scaler_meta": _scaler_dict(scaler_meta),
         "feature_names_main": feature_names,
         "feature_names_meta": feature_names_meta,
+        "buy_feature_names": report.get("buy_feature_names", feature_names),
+        "sell_feature_names": report.get("sell_feature_names", feature_names_meta),
+        "model_type": report.get("model_type", "dual_edge"),
         "onnx_main_validation": onnx_check_main,
         "onnx_meta_validation": onnx_check_meta,
     }
