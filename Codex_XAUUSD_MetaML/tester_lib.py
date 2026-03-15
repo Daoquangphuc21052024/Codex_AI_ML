@@ -81,6 +81,12 @@ def backtest_probabilities(
     slippage_points: float = 0.0,
     use_spread_column: bool = False,
     same_bar_conflict: str = "sl_first",
+    barrier_type: str = "fixed",
+    atr_window: int = 14,
+    tp_atr_buy: float = 1.2,
+    sl_atr_buy: float = 1.0,
+    tp_atr_sell: float = 1.2,
+    sl_atr_sell: float = 1.0,
 ) -> tuple[pd.DataFrame, dict]:
     required = {"open", "high", "low", "close", "prob_buy", "prob_sell"}
     if not required.issubset(dataset.columns):
@@ -89,6 +95,8 @@ def backtest_probabilities(
         raise ValueError("entry_mode must be close or next_open")
     if same_bar_conflict not in {"sl_first", "tp_first"}:
         raise ValueError("same_bar_conflict must be sl_first or tp_first")
+    if barrier_type not in {"fixed", "atr"}:
+        raise ValueError("barrier_type must be fixed or atr")
 
     df = dataset.copy()
     actions = resolve_actions(
@@ -106,9 +114,26 @@ def backtest_probabilities(
     l = df["low"].to_numpy(dtype=float)
     c = df["close"].to_numpy(dtype=float)
     spr = df["spread"].to_numpy(dtype=float) if "spread" in df.columns else np.zeros(len(df), dtype=float)
+    if barrier_type == "atr":
+        if "atr" in df.columns:
+            atr_series = df["atr"].to_numpy(dtype=float)
+        else:
+            prev_close = df["close"].shift(1)
+            tr = pd.concat(
+                [
+                    (df["high"] - df["low"]),
+                    (df["high"] - prev_close).abs(),
+                    (df["low"] - prev_close).abs(),
+                ],
+                axis=1,
+            ).max(axis=1)
+            atr_series = tr.rolling(atr_window, min_periods=atr_window).mean().to_numpy(dtype=float)
+    else:
+        atr_series = np.zeros(len(df), dtype=float)
 
     trades: list[dict] = []
     overlap_count = 0
+    skipped_signals_due_to_active_trade = 0
     exposure_bars = np.zeros(len(df), dtype=np.int8)
     active_until = -1
 
@@ -118,6 +143,7 @@ def backtest_probabilities(
             continue
 
         if not allow_overlap and i <= active_until:
+            skipped_signals_due_to_active_trade += 1
             continue
         if allow_overlap and i <= active_until:
             overlap_count += 1
@@ -131,8 +157,21 @@ def backtest_probabilities(
             spread_col_val=spr[entry_idx] if use_spread_column else None,
         )
 
-        tp_price = entry + take if side == 0 else entry - take
-        sl_price = entry - stop if side == 0 else entry + stop
+        if barrier_type == "atr":
+            # label at bar (entry_idx-1) for next_open alignment, else entry bar.
+            label_ref_idx = max(0, entry_idx - 1 if entry_mode == "next_open" else entry_idx)
+            atr_val = atr_series[label_ref_idx]
+            if not np.isfinite(atr_val) or atr_val <= 0:
+                continue
+            if side == 0:
+                tp_price = entry + tp_atr_buy * atr_val
+                sl_price = entry - sl_atr_buy * atr_val
+            else:
+                tp_price = entry - tp_atr_sell * atr_val
+                sl_price = entry + sl_atr_sell * atr_val
+        else:
+            tp_price = entry + take if side == 0 else entry - take
+            sl_price = entry - stop if side == 0 else entry + stop
 
         exit_idx = None
         exit_reason = "timeout"
@@ -150,21 +189,21 @@ def backtest_probabilities(
                 if same_bar_conflict == "sl_first":
                     exit_idx = j
                     exit_reason = "sl_conflict"
-                    raw_move = -stop
+                    raw_move = sl_price - entry if side == 0 else entry - sl_price
                 else:
                     exit_idx = j
                     exit_reason = "tp_conflict"
-                    raw_move = take
+                    raw_move = tp_price - entry if side == 0 else entry - tp_price
                 break
             if hit_tp:
                 exit_idx = j
                 exit_reason = "tp"
-                raw_move = take
+                raw_move = tp_price - entry if side == 0 else entry - tp_price
                 break
             if hit_sl:
                 exit_idx = j
                 exit_reason = "sl"
-                raw_move = -stop
+                raw_move = sl_price - entry if side == 0 else entry - sl_price
                 break
 
         if exit_idx is None:
@@ -205,6 +244,7 @@ def backtest_probabilities(
         "buy_actions": buy_actions,
         "sell_actions": sell_actions,
         "overlap_count": int(overlap_count),
+        "skipped_signals_due_to_active_trade": int(skipped_signals_due_to_active_trade),
         "allow_overlap": bool(allow_overlap),
         "cost_model": {
             "spread_points": float(spread_points + markup),
@@ -213,6 +253,9 @@ def backtest_probabilities(
             "use_spread_column": bool(use_spread_column),
         },
         "entry_mode": entry_mode,
+        "barrier_type": barrier_type,
+        "same_bar_conflict": same_bar_conflict,
+        "signal_shift": int(signal_shift),
         "exposure_ratio": float(exposure_bars.mean()),
     }
 

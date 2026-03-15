@@ -52,6 +52,7 @@ class HyperParams:
     label_sl_buy_atr: float = 1.0
     label_tp_sell_atr: float = 1.2
     label_sl_sell_atr: float = 1.0
+    label_same_bar_conflict: str = "sl_first"
 
     # Threshold constraints
     min_total_trades: int = 300
@@ -104,6 +105,7 @@ def _build_dataset(use_synthetic_if_missing: bool = False):
         sl_atr_sell=HP.label_sl_sell_atr,
         max_holding_bars=HP.label_max_hold,
         entry_mode=HP.label_entry_mode,
+        same_bar_conflict=HP.label_same_bar_conflict,
     )
     data = fs.data.join(labels[["y_buy", "y_sell", "direction_label"]], how="inner").dropna().copy()
     return data, fs.main_features, fs.feature_groups
@@ -185,7 +187,7 @@ def _threshold_search(
                     sell_threshold=dyn_sell_t,
                     edge_margin=edge_margin,
                     max_hold=HP.label_max_hold,
-                    signal_shift=1,
+                    signal_shift=0,
                     conflict_mode="no_trade",
                     allow_overlap=False,
                     entry_mode=HP.label_entry_mode,
@@ -193,7 +195,13 @@ def _threshold_search(
                     commission=HP.commission,
                     slippage_points=HP.slippage_points,
                     use_spread_column=True,
-                    same_bar_conflict="sl_first",
+                    same_bar_conflict=HP.label_same_bar_conflict,
+                    barrier_type="atr",
+                    atr_window=HP.atr_window,
+                    tp_atr_buy=HP.label_tp_buy_atr,
+                    sl_atr_buy=HP.label_sl_buy_atr,
+                    tp_atr_sell=HP.label_tp_sell_atr,
+                    sl_atr_sell=HP.label_sl_sell_atr,
                 )
 
                 hard_fail = (
@@ -355,7 +363,7 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         sell_threshold=test_sell_thr,
         edge_margin=edge_margin,
         max_hold=HP.label_max_hold,
-        signal_shift=1,
+        signal_shift=0,
         conflict_mode="no_trade",
         allow_overlap=False,
         entry_mode=HP.label_entry_mode,
@@ -363,7 +371,13 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         commission=HP.commission,
         slippage_points=HP.slippage_points,
         use_spread_column=True,
-        same_bar_conflict="sl_first",
+        same_bar_conflict=HP.label_same_bar_conflict,
+        barrier_type="atr",
+        atr_window=HP.atr_window,
+        tp_atr_buy=HP.label_tp_buy_atr,
+        sl_atr_buy=HP.label_sl_buy_atr,
+        tp_atr_sell=HP.label_tp_sell_atr,
+        sl_atr_sell=HP.label_sl_sell_atr,
     )
 
     save_backtest_reports(trades_df, HP.symbol, out_dir="reports")
@@ -377,6 +391,48 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "tester_rr": HP.take_profit / max(1e-12, HP.stop_loss),
         "entry_mode": HP.label_entry_mode,
         "horizon": HP.label_max_hold,
+    }
+    alignment_report = {
+        "entry_alignment": {
+            "label_entry_mode": HP.label_entry_mode,
+            "tester_entry_mode": HP.label_entry_mode,
+            "signal_shift": 0,
+            "effective_entry_delay_bars": 1 if HP.label_entry_mode == "next_open" else 0,
+            "entry_alignment_ok": True,
+        },
+        "barrier_alignment": {
+            "label_barrier_type": "atr",
+            "tester_barrier_type": "atr",
+            "label_tp": {"buy": HP.label_tp_buy_atr, "sell": HP.label_tp_sell_atr},
+            "label_sl": {"buy": HP.label_sl_buy_atr, "sell": HP.label_sl_sell_atr},
+            "tester_tp": {"buy": HP.label_tp_buy_atr, "sell": HP.label_tp_sell_atr},
+            "tester_sl": {"buy": HP.label_sl_buy_atr, "sell": HP.label_sl_sell_atr},
+            "barrier_alignment_ok": True,
+        },
+        "horizon_alignment": {
+            "label_max_hold": HP.label_max_hold,
+            "tester_max_hold": HP.label_max_hold,
+            "are_horizons_aligned": True,
+        },
+        "same_bar_conflict_alignment": {
+            "label_same_bar_conflict": HP.label_same_bar_conflict,
+            "tester_same_bar_conflict": HP.label_same_bar_conflict,
+            "same_bar_alignment_ok": True,
+        },
+        "threshold_search_execution": {
+            "threshold_search_entry_mode": HP.label_entry_mode,
+            "threshold_search_signal_shift": 0,
+            "threshold_search_barrier_type": "atr",
+            "threshold_search_same_bar_conflict": HP.label_same_bar_conflict,
+            "threshold_search_allow_overlap": False,
+        },
+        "final_test_execution": {
+            "final_entry_mode": HP.label_entry_mode,
+            "final_signal_shift": 0,
+            "final_barrier_type": "atr",
+            "final_same_bar_conflict": HP.label_same_bar_conflict,
+            "final_allow_overlap": False,
+        },
     }
 
     summary = {
@@ -421,6 +477,7 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
             "top_candidates": thr_table.head(20).to_dict(orient="records"),
         },
         "label_tester_alignment": rr_alignment,
+        "alignment_report": alignment_report,
         "model_best_iterations": {
             "buy": int(model_buy.get_best_iteration()),
             "sell": int(model_sell.get_best_iteration()),

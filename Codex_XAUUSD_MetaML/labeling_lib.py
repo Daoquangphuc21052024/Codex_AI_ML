@@ -27,6 +27,7 @@ def create_dual_edge_labels(
     sl_atr_sell: float = 1.0,
     max_holding_bars: int = 12,
     entry_mode: str = "next_open",
+    same_bar_conflict: str = "sl_first",
 ) -> pd.DataFrame:
     """Create H1 dual-edge labels using OHLC first-touch logic.
 
@@ -42,6 +43,8 @@ def create_dual_edge_labels(
     """
     if entry_mode not in {"close", "next_open"}:
         raise ValueError("entry_mode must be 'close' or 'next_open'")
+    if same_bar_conflict not in {"sl_first", "tp_first"}:
+        raise ValueError("same_bar_conflict must be 'sl_first' or 'tp_first'")
 
     atr = _atr(high, low, close, atr_window)
     n = len(close)
@@ -84,7 +87,14 @@ def create_dual_edge_labels(
             if not buy_done:
                 hit_tp = h[j] >= buy_tp
                 hit_sl = l[j] <= buy_sl
-                if hit_tp and not hit_sl:
+                if hit_tp and hit_sl:
+                    if same_bar_conflict == "tp_first":
+                        y_buy[i] = 1
+                        buy_tp_count += 1
+                    else:
+                        buy_fail_count += 1
+                    buy_done = True
+                elif hit_tp:
                     y_buy[i] = 1
                     buy_tp_count += 1
                     buy_done = True
@@ -95,7 +105,14 @@ def create_dual_edge_labels(
             if not sell_done:
                 hit_tp = l[j] <= sell_tp
                 hit_sl = h[j] >= sell_sl
-                if hit_tp and not hit_sl:
+                if hit_tp and hit_sl:
+                    if same_bar_conflict == "tp_first":
+                        y_sell[i] = 1
+                        sell_tp_count += 1
+                    else:
+                        sell_fail_count += 1
+                    sell_done = True
+                elif hit_tp:
                     y_sell[i] = 1
                     sell_tp_count += 1
                     sell_done = True
@@ -122,6 +139,9 @@ def create_dual_edge_labels(
         "buy_failure_count": buy_fail_count,
         "sell_failure_count": sell_fail_count,
         "entry_mode": entry_mode,
+        "same_bar_conflict": same_bar_conflict,
+        "barrier_type": "atr",
+        "max_holding_bars": max_holding_bars,
     }
     return out
 
