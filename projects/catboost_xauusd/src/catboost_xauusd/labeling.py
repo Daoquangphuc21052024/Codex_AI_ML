@@ -14,6 +14,16 @@ class LabelDiagnostics:
     combos_tested: int
 
 
+def _resolve_event(tp_hit: bool, sl_hit: bool, tie_breaker: str) -> str | None:
+    if tp_hit and sl_hit:
+        return "tp" if tie_breaker == "tp_priority" else "sl"
+    if tp_hit:
+        return "tp"
+    if sl_hit:
+        return "sl"
+    return None
+
+
 def _first_hit_direction(
     future_high: np.ndarray,
     future_low: np.ndarray,
@@ -28,26 +38,8 @@ def _first_hit_direction(
     sell_sl = entry + sl
 
     for h, l in zip(future_high, future_low):
-        buy_tp_hit = h >= buy_tp
-        buy_sl_hit = l <= buy_sl
-        sell_tp_hit = l <= sell_tp
-        sell_sl_hit = h >= sell_sl
-
-        buy_event = None
-        if buy_tp_hit and buy_sl_hit:
-            buy_event = "tp" if tie_breaker == "tp_priority" else "sl"
-        elif buy_tp_hit:
-            buy_event = "tp"
-        elif buy_sl_hit:
-            buy_event = "sl"
-
-        sell_event = None
-        if sell_tp_hit and sell_sl_hit:
-            sell_event = "tp" if tie_breaker == "tp_priority" else "sl"
-        elif sell_tp_hit:
-            sell_event = "tp"
-        elif sell_sl_hit:
-            sell_event = "sl"
+        buy_event = _resolve_event(h >= buy_tp, l <= buy_sl, tie_breaker)
+        sell_event = _resolve_event(l <= sell_tp, h >= sell_sl, tie_breaker)
 
         if buy_event == "tp" and sell_event != "tp":
             return 1
@@ -59,6 +51,40 @@ def _first_hit_direction(
             return 0
 
     return 0
+
+
+def simulate_signal_outcome(
+    future_high: np.ndarray,
+    future_low: np.ndarray,
+    entry: float,
+    signal: int,
+    tp: float,
+    sl: float,
+    tie_breaker: str,
+) -> float:
+    if signal == 0:
+        return 0.0
+
+    if signal == 1:
+        tp_level = entry + tp
+        sl_level = entry - sl
+        for h, l in zip(future_high, future_low):
+            event = _resolve_event(h >= tp_level, l <= sl_level, tie_breaker)
+            if event == "tp":
+                return 1.0
+            if event == "sl":
+                return -1.0
+        return 0.0
+
+    tp_level = entry - tp
+    sl_level = entry + sl
+    for h, l in zip(future_high, future_low):
+        event = _resolve_event(l <= tp_level, h >= sl_level, tie_breaker)
+        if event == "tp":
+            return 1.0
+        if event == "sl":
+            return -1.0
+    return 0.0
 
 
 def create_labels(df: pd.DataFrame, cfg: LabelingConfig) -> tuple[pd.DataFrame, LabelDiagnostics]:
@@ -86,8 +112,7 @@ def create_labels(df: pd.DataFrame, cfg: LabelingConfig) -> tuple[pd.DataFrame, 
             labels[i] = 0
 
     out["label"] = labels
-    out = out.iloc[: n - cfg.horizon_bars].copy()
-    out = out.reset_index(drop=True)
+    out = out.iloc[: n - cfg.horizon_bars].copy().reset_index(drop=True)
 
     counts = out["label"].value_counts().sort_index().to_dict()
     diagnostics = LabelDiagnostics(label_counts={int(k): int(v) for k, v in counts.items()}, combos_tested=len(combos))

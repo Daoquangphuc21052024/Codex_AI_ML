@@ -40,6 +40,7 @@ def engineer_features(df: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
         out[f"volatility_{w}"] = out["log_ret_1"].rolling(w, min_periods=w).std()
         out[f"velocity_{w}"] = out["close"].pct_change(w)
         out[f"intensity_{w}"] = out["body_size"].rolling(w, min_periods=w).mean()
+        out[f"tr_norm_{w}"] = out["true_range"].rolling(w, min_periods=w).mean() / out["close"].replace(0, np.nan)
 
     out["volatility_regime"] = np.where(
         out[f"volatility_{cfg.windows[-1]}"] > out[f"volatility_{cfg.windows[-1]}"].rolling(cfg.windows[-1], min_periods=cfg.windows[-1]).median(),
@@ -64,19 +65,9 @@ def engineer_features(df: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
         f"velocity_{w}" for w in cfg.windows
     ] + [
         f"intensity_{w}" for w in cfg.windows
+    ] + [
+        f"tr_norm_{w}" for w in cfg.windows
     ]
 
-    selected = correlation_filter(out[candidate_features], cfg.corr_threshold, cfg.max_features)
-    out = out.dropna(subset=selected).reset_index(drop=True)
-    return out, selected
-
-
-def correlation_filter(features_df: pd.DataFrame, threshold: float, max_features: int) -> list[str]:
-    corr = features_df.corr().abs()
-    selected: list[str] = []
-    for col in corr.columns:
-        if len(selected) >= max_features:
-            break
-        if all(corr.loc[col, s] < threshold for s in selected):
-            selected.append(col)
-    return selected[:max_features]
+    out = out.dropna(subset=candidate_features).reset_index(drop=True)
+    return out, candidate_features

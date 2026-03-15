@@ -38,34 +38,44 @@ def run(config_path: str) -> None:
     raw_df.to_csv(cfg.paths.raw_data, index=False)
 
     clean_df = clean_ohlcv(raw_df)
-    feature_df, feature_cols = engineer_features(clean_df, cfg.features)
+    feature_df, candidate_features = engineer_features(clean_df, cfg.features)
     labeled_df, diagnostics = create_labels(feature_df, cfg.labeling)
     folds = make_walk_forward_folds(labeled_df, cfg.train)
 
-    model, fold_results, pred_df = train_walk_forward(labeled_df, feature_cols, folds, cfg.train, logger)
-    backtest_df = run_backtest(pred_df, cfg.train.threshold_no_trade)
+    model, fold_results, pred_df, final_features = train_walk_forward(
+        labeled_df,
+        candidate_features,
+        folds,
+        cfg.train,
+        cfg.features,
+        logger,
+    )
+    backtest_df = run_backtest(pred_df, cfg.labeling)
 
     fi = pd.DataFrame(
-        {"feature": feature_cols, "importance": model.get_feature_importance()}
+        {"feature": final_features, "importance": model.get_feature_importance()}
     ).sort_values("importance", ascending=False)
 
     generate_plots(
         labeled_df=labeled_df,
         feature_df=feature_df,
-        feature_cols=feature_cols,
+        feature_cols=final_features,
         fold_results=fold_results,
         backtest_df=backtest_df,
         feature_importance=fi,
         reports_dir=cfg.paths.reports_dir,
     )
 
-    export_artifacts(model, feature_cols, labeled_df[feature_cols], cfg.paths.artifacts_dir)
+    onnx_verification = export_artifacts(model, final_features, labeled_df[final_features], cfg.paths.artifacts_dir)
 
     Path(cfg.paths.artifacts_dir).mkdir(parents=True, exist_ok=True)
     fi.to_csv(Path(cfg.paths.artifacts_dir) / "feature_importance.csv", index=False)
     backtest_df.to_csv(Path(cfg.paths.artifacts_dir) / "backtest_results.csv", index=False)
-    pd.DataFrame(
-        [
+
+    fold_metrics = []
+    fold_features = {}
+    for fr in fold_results:
+        fold_metrics.append(
             {
                 "fold": fr.fold,
                 "train_acc": fr.train_acc,
@@ -78,10 +88,12 @@ def run(config_path: str) -> None:
                 "no_trade_threshold": fr.no_trade_threshold,
                 "min_side_prob": fr.min_side_prob,
                 "side_gap": fr.side_gap,
+                "n_selected_features": len(fr.selected_features),
             }
-            for fr in fold_results
-        ]
-    ).to_csv(Path(cfg.paths.artifacts_dir) / "fold_metrics.csv", index=False)
+        )
+        fold_features[f"fold_{fr.fold}"] = fr.selected_features
+
+    pd.DataFrame(fold_metrics).to_csv(Path(cfg.paths.artifacts_dir) / "fold_metrics.csv", index=False)
 
     with (Path(cfg.paths.artifacts_dir) / "label_diagnostics.json").open("w", encoding="utf-8") as f:
         json.dump(
@@ -94,7 +106,13 @@ def run(config_path: str) -> None:
             indent=2,
         )
 
-    logger.info("Completed pipeline with %d selected features: %s", len(feature_cols), feature_cols)
+    with (Path(cfg.paths.artifacts_dir) / "fold_selected_features.json").open("w", encoding="utf-8") as f:
+        json.dump(fold_features, f, ensure_ascii=False, indent=2)
+
+    with (Path(cfg.paths.artifacts_dir) / "onnx_verification.json").open("w", encoding="utf-8") as f:
+        json.dump(onnx_verification, f, ensure_ascii=False, indent=2)
+
+    logger.info("Completed pipeline with %d final selected features: %s", len(final_features), final_features)
 
 
 def main() -> None:

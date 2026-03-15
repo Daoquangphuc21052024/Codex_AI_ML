@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project runtime outputs
+projects/catboost_xauusd/artifacts/
+projects/catboost_xauusd/reports/
+projects/catboost_xauusd/logs/
+projects/catboost_xauusd/data/raw_*.csv

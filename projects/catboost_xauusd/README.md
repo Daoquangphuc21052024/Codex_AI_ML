@@ -1,6 +1,6 @@
 # CatBoost XAUUSD H1 MT5 Pipeline (Production-style)
 
-End-to-end Python project (v0.4.0) for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
+End-to-end Python project (v0.5.0) for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
 
 ## Objectives
 
@@ -50,7 +50,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Schema update (v0.4.0 - bắt buộc)
+## Schema update (v0.5.0 - bắt buộc)
 
 Pipeline hiện chỉ hỗ trợ schema mới theo **time-range time series**.
 Các key cũ đã bị chặn cứng (không cho chạy):
@@ -74,12 +74,16 @@ mt5:
 ```
 
 
-## v0.4.0 improvements from live test feedback
+## v0.5.0 improvements from live test feedback
 
-- Added **class-weighted CatBoost** per fold to reduce class collapse.
-- Added **validation-based threshold optimization** for final class decision (`no_trade_threshold`, `min_side_prob`, `side_gap`) to avoid always predicting one side.
-- Added robust metrics per fold: `macro_f1`, `balanced_acc`, plus decision thresholds stored in `fold_metrics.csv`.
-- Silenced sklearn undefined precision warnings correctly via `zero_division=0` in reports/F1 computation.
+- **Fold-local feature pruning** (mutual information + correlation filter) so feature selection is learned from train split only (anti-leakage).
+- **Class-collapse defense** improved:
+  - class weights per fold,
+  - validation-only threshold tuning,
+  - collapse penalty in threshold objective.
+- **Decision logic tuning** uses validation-only optimization over `no_trade_threshold`, `min_side_prob`, `side_gap` with macro/balanced targets.
+- **Backtest logic aligned with labels**: trades are now evaluated by TP/SL hit-first within `horizon_bars` (R-multiple), not next-bar return proxy.
+- **ONNX integrity check** after export via `onnxruntime` (when available), saved to `artifacts/onnx_verification.json`.
 
 ## Configuration
 
@@ -103,6 +107,14 @@ Script sẽ tạo dữ liệu synthetic OHLCV, chạy full pipeline, và assert 
 ## Run
 
 ```bash
+python run_pipeline.py --config configs/config.yaml
+```
+
+## Windows usage
+
+```powershell
+cd E:\GPT\catboost_xauusd
+.\.venv\Scripts\Activate.ps1
 python run_pipeline.py --config configs/config.yaml
 ```
 
@@ -139,6 +151,8 @@ Rules:
 - `artifacts/fold_metrics.csv`
 - `artifacts/backtest_results.csv`
 - `artifacts/label_diagnostics.json`
+- `artifacts/fold_selected_features.json`
+- `artifacts/onnx_verification.json`
 
 ### Reports (PNG)
 

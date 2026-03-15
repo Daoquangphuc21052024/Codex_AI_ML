@@ -60,7 +60,7 @@ def generate_plots(
     _save(fig, out_dir / "label_distribution.png")
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    backtest_df["pnl"].hist(bins=60, ax=ax)
+    backtest_df["pnl_r"].hist(bins=60, ax=ax)
     ax.set_title("Return Distribution")
     _save(fig, out_dir / "return_distribution.png")
 
