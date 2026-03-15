@@ -23,25 +23,50 @@ def classification_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: flo
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "predicted_positive_rate": float(np.mean(y_pred)),
         "roc_auc": float(roc_auc_score(y_true, y_prob)) if len(np.unique(y_true)) > 1 else 0.0,
         "pr_auc": float(average_precision_score(y_true, y_prob)) if len(np.unique(y_true)) > 1 else 0.0,
     }
     return metrics, y_pred, confusion_matrix(y_true, y_pred)
 
 
-def optimize_threshold(y_true: pd.Series, y_prob: np.ndarray, thresholds: list[float] | None = None) -> tuple[float, dict]:
+def optimize_threshold(
+    y_true: pd.Series,
+    y_prob: np.ndarray,
+    thresholds: list[float] | None = None,
+    min_positive_rate: float = 0.2,
+    max_positive_rate: float = 0.8,
+) -> tuple[float, dict]:
+    """Threshold tuning on validation set.
+
+    We optimize for macro F1 and constrain positive-rate range to avoid
+    class-collapse (e.g. predict-all-sell).
+    """
     if thresholds is None:
-        thresholds = [round(x, 2) for x in np.arange(0.3, 0.71, 0.02)]
+        thresholds = [round(x, 3) for x in np.arange(0.35, 0.66, 0.005)]
 
     best_t = 0.5
-    best = {"f1": -1.0}
+    best_score = -1.0
+    best: dict = {"f1_macro": -1.0}
     rows = []
+
     for t in thresholds:
-        m, _, _ = classification_metrics(y_true, y_prob, t)
-        rows.append({"threshold": t, **m})
-        if m["f1"] > best["f1"]:
-            best = m
+        m, y_pred, _ = classification_metrics(y_true, y_prob, t)
+        pos_rate = float(np.mean(y_pred))
+        penalty = 0.0
+        if pos_rate < min_positive_rate or pos_rate > max_positive_rate:
+            penalty = 0.2
+
+        score = m["f1_macro"] - penalty
+        row = {"threshold": t, "score": score, "penalty": penalty, **m}
+        rows.append(row)
+
+        if score > best_score:
+            best_score = score
             best_t = t
+            best = row
+
     return best_t, {"best": best, "all": rows}
 
 

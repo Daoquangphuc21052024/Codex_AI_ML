@@ -115,6 +115,8 @@ def backtest_signals(
     dd = _drawdown(trades_df["cum_pnl"])
     r = trades_df["pnl"]
     downside = r[r < 0]
+    downside_std = float(downside.std(ddof=0)) if len(downside) else 0.0
+    total_std = float(r.std(ddof=0)) if len(r) else 0.0
 
     metrics = {
         "trades": int(len(trades_df)),
@@ -124,8 +126,8 @@ def backtest_signals(
         "expectancy": float(trades_df["pnl"].mean()),
         "pnl": float(trades_df["pnl"].sum()),
         "max_drawdown": float(dd.min()),
-        "sharpe_like": float(r.mean() / (r.std() + 1e-12)),
-        "sortino_like": float(r.mean() / (downside.std() + 1e-12)) if len(downside) else 0.0,
+        "sharpe_like": float(r.mean() / (total_std + 1e-12)),
+        "sortino_like": float(r.mean() / downside_std) if downside_std > 1e-12 else 0.0,
         "long_trades": int((trades_df["side"] == "buy").sum()),
         "short_trades": int((trades_df["side"] == "sell").sum()),
     }
