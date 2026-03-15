@@ -129,6 +129,8 @@ struct MarketStructure
    bool                valid;
    int                 breakBar;
    int                 sourceTier;
+   datetime            sourceSwingTime;
+   double              sourceSwingPrice;
 };
 
 struct LiquiditySweep
@@ -142,6 +144,8 @@ struct LiquiditySweep
    int      barIndex;
    int      tier;
    bool     rejectionStrong;
+   datetime sourceSwingTime;
+   double   sourceSwingPrice;
 };
 
 struct LiquidityPool
@@ -357,6 +361,11 @@ input bool InpShowFVG      = true;
 input bool InpShowOTE      = true;
 input bool InpShowEntry    = true;
 input bool InpShowStateComment = true;
+input bool InpShowStructureEventLines = true;
+input bool InpShowLiquiditySweepLines = true;
+input bool InpShowLiquidityLevels     = true;
+input bool InpShowDisplacementLeg     = true;
+input bool InpShowTradeReasonLabels   = true;
 
 //============================================================
 // GLOBAL VARIABLES
@@ -807,11 +816,13 @@ void DetectMarketStructure()
    if(hasInternalHigh && close1 > internalHigh.price)
    {
       g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalHigh.price; g_lastStructure.direction=1; g_lastStructure.breakBar=1; g_lastStructure.sourceTier=SWING_INTERNAL;
+      g_lastStructure.sourceSwingTime=internalHigh.time; g_lastStructure.sourceSwingPrice=internalHigh.price;
       g_lastStructure.type=(internalTrend==-1?STRUCT_CHOCH:STRUCT_BOS); MarkSwingBroken(SWING_INTERNAL,internalHigh.time,true); return;
    }
    if(hasInternalLow && close1 < internalLow.price)
    {
       g_lastStructure.valid=true; g_lastStructure.time=time1; g_lastStructure.level=internalLow.price; g_lastStructure.direction=-1; g_lastStructure.breakBar=1; g_lastStructure.sourceTier=SWING_INTERNAL;
+      g_lastStructure.sourceSwingTime=internalLow.time; g_lastStructure.sourceSwingPrice=internalLow.price;
       g_lastStructure.type=(internalTrend==1?STRUCT_CHOCH:STRUCT_BOS); MarkSwingBroken(SWING_INTERNAL,internalLow.time,false); return;
    }
 }
@@ -828,12 +839,12 @@ void DetectLiquiditySweep()
    if(hasExtLow)
    {
       bool wickBelow=(low1<extLow.price-tol), closeBackIn=(close1>extLow.price), rejection=(range1>0 && body1/range1>=0.40 && close1>(low1+range1*0.45));
-      if(wickBelow && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extLow.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; return; }
+      if(wickBelow && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extLow.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; g_lastSweep.sourceSwingTime=extLow.time; g_lastSweep.sourceSwingPrice=extLow.price; return; }
    }
    if(hasExtHigh)
    {
       bool wickAbove=(high1>extHigh.price+tol), closeBackIn=(close1<extHigh.price), rejection=(range1>0 && body1/range1>=0.40 && close1<(high1-range1*0.45));
-      if(wickAbove && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extHigh.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=-1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; return; }
+      if(wickAbove && closeBackIn){ g_lastSweep.valid=true; g_lastSweep.time=time1; g_lastSweep.liquidityLevel=extHigh.price; g_lastSweep.sweepLow=low1; g_lastSweep.sweepHigh=high1; g_lastSweep.direction=-1; g_lastSweep.barIndex=1; g_lastSweep.tier=SWING_EXTERNAL; g_lastSweep.rejectionStrong=rejection; g_lastSweep.sourceSwingTime=extHigh.time; g_lastSweep.sourceSwingPrice=extHigh.price; return; }
    }
 }
 
@@ -1231,18 +1242,119 @@ bool HasAnyExposure(int direction){ return (HasOpenPosition(direction) || HasPen
 
 void EnsureArrow(string name, datetime t, double price, int code, color c){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_ARROW,0,t,price); ObjectSetInteger(0,name,OBJPROP_TIME,0,t); ObjectSetDouble(0,name,OBJPROP_PRICE,0,price); ObjectSetInteger(0,name,OBJPROP_ARROWCODE,code); ObjectSetInteger(0,name,OBJPROP_COLOR,c); ObjectSetInteger(0,name,OBJPROP_WIDTH,1); }
 void EnsureText(string name, datetime t, double price, string text){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_TEXT,0,t,price); ObjectSetInteger(0,name,OBJPROP_TIME,0,t); ObjectSetDouble(0,name,OBJPROP_PRICE,0,price); ObjectSetString(0,name,OBJPROP_TEXT,text); ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite); ObjectSetInteger(0,name,OBJPROP_FONTSIZE,8); }
+void EnsureTextStyled(string name, datetime t, double price, string text, color c, int fontSize){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_TEXT,0,t,price); ObjectSetInteger(0,name,OBJPROP_TIME,0,t); ObjectSetDouble(0,name,OBJPROP_PRICE,0,price); ObjectSetString(0,name,OBJPROP_TEXT,text); ObjectSetInteger(0,name,OBJPROP_COLOR,c); ObjectSetInteger(0,name,OBJPROP_FONTSIZE,fontSize); }
 void EnsureHLine(string name,double price,color c,ENUM_LINE_STYLE style){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_HLINE,0,0,price); ObjectSetDouble(0,name,OBJPROP_PRICE,price); ObjectSetInteger(0,name,OBJPROP_COLOR,c); ObjectSetInteger(0,name,OBJPROP_STYLE,style); ObjectSetInteger(0,name,OBJPROP_WIDTH,1); }
 void EnsureRectangle(string name, datetime t1,double p1,datetime t2,double p2,color c){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_RECTANGLE,0,t1,p1,t2,p2); ObjectSetInteger(0,name,OBJPROP_TIME,0,t1); ObjectSetDouble(0,name,OBJPROP_PRICE,0,p1); ObjectSetInteger(0,name,OBJPROP_TIME,1,t2); ObjectSetDouble(0,name,OBJPROP_PRICE,1,p2); ObjectSetInteger(0,name,OBJPROP_COLOR,c); ObjectSetInteger(0,name,OBJPROP_BACK,true); ObjectSetInteger(0,name,OBJPROP_FILL,true); ObjectSetInteger(0,name,OBJPROP_WIDTH,1); }
+void EnsureTrendLine(string name, datetime t1, double p1, datetime t2, double p2, color c, ENUM_LINE_STYLE style, int width, bool rayRight){ if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_TREND,0,t1,p1,t2,p2); ObjectSetInteger(0,name,OBJPROP_TIME,0,t1); ObjectSetDouble(0,name,OBJPROP_PRICE,0,p1); ObjectSetInteger(0,name,OBJPROP_TIME,1,t2); ObjectSetDouble(0,name,OBJPROP_PRICE,1,p2); ObjectSetInteger(0,name,OBJPROP_COLOR,c); ObjectSetInteger(0,name,OBJPROP_STYLE,style); ObjectSetInteger(0,name,OBJPROP_WIDTH,width); ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT,rayRight); }
 void DrawSwingArray(SwingPoint &arr[], int count, string prefix, color defaultColor){ int startIdx=MathMax(0,count-12); for(int i=startIdx;i<count;i++){ string nm=g_objPrefix+prefix+IntegerToString(i); color c=defaultColor; if(arr[i].isHigh) c=(arr[i].broken?clrDimGray:clrTomato); else c=(arr[i].broken?clrDimGray:clrDodgerBlue); EnsureArrow(nm,arr[i].time,arr[i].price,(arr[i].isHigh?218:217),c);} }
+
+bool GetLatestSwingAny(int tier, bool wantHigh, SwingPoint &out)
+{
+   if(tier == SWING_INTERNAL)
+   {
+      for(int i=g_internalCount-1;i>=0;i--)
+         if(g_internalSwings[i].isHigh==wantHigh){ out=g_internalSwings[i]; return true; }
+   }
+   else
+   {
+      for(int i=g_externalCount-1;i>=0;i--)
+         if(g_externalSwings[i].isHigh==wantHigh){ out=g_externalSwings[i]; return true; }
+   }
+   return false;
+}
+
+void DrawStructureEvent()
+{
+   if(!InpShowBOSCHoCH || !g_lastStructure.valid) return;
+
+   color c = (g_lastStructure.direction == 1 ? clrDodgerBlue : clrOrangeRed);
+   string dir = (g_lastStructure.direction == 1 ? "BUY" : "SELL");
+   string eventName = g_objPrefix + "STRUCT_EVT_" + dir + "_" + IntegerToString((int)g_lastStructure.time);
+   string labelName = g_objPrefix + "STRUCT_TXT_" + dir + "_" + IntegerToString((int)g_lastStructure.time);
+
+   if(InpShowStructureEventLines && g_lastStructure.sourceSwingTime > 0)
+      EnsureTrendLine(eventName, g_lastStructure.sourceSwingTime, g_lastStructure.level, g_lastStructure.time, g_lastStructure.level, c, STYLE_SOLID, 2, false);
+
+   EnsureTextStyled(labelName, g_lastStructure.time, g_lastStructure.level, StructureTypeToString(g_lastStructure.type), c, 9);
+}
+
+void DrawSweepEvent()
+{
+   if(!InpShowSweep || !g_lastSweep.valid) return;
+
+   color c = (g_lastSweep.direction == 1 ? clrDeepSkyBlue : clrTomato);
+   string dir = (g_lastSweep.direction == 1 ? "BUY" : "SELL");
+   string eventName = g_objPrefix + "SWEEP_EVT_" + dir + "_" + IntegerToString((int)g_lastSweep.time);
+   string labelName = g_objPrefix + "SWEEP_TXT_" + dir + "_" + IntegerToString((int)g_lastSweep.time);
+
+   if(InpShowLiquiditySweepLines && g_lastSweep.sourceSwingTime > 0)
+      EnsureTrendLine(eventName, g_lastSweep.sourceSwingTime, g_lastSweep.liquidityLevel, g_lastSweep.time, g_lastSweep.liquidityLevel, c, STYLE_SOLID, 2, false);
+
+   double px=(g_lastSweep.direction==1?g_lastSweep.sweepLow:g_lastSweep.sweepHigh);
+   EnsureArrow(g_objPrefix + "SWEEP_ARROW_" + dir, g_lastSweep.time, px, 241, c);
+   EnsureTextStyled(labelName, g_lastSweep.time, px, (g_lastSweep.direction==1?"SSL Sweep":"BSL Sweep"), c, 8);
+}
+
+void DrawLiquidityLevels()
+{
+   if(!InpShowLiquidityLevels) return;
+
+   SwingPoint s;
+   if(GetLatestSwingAny(SWING_INTERNAL, true, s))
+      EnsureHLine(g_objPrefix + "LQ_INT_HIGH", s.price, (s.broken ? clrDimGray : clrSilver), STYLE_DASHDOT);
+   if(GetLatestSwingAny(SWING_INTERNAL, false, s))
+      EnsureHLine(g_objPrefix + "LQ_INT_LOW", s.price, (s.broken ? clrDimGray : clrSilver), STYLE_DASHDOT);
+   if(GetLatestSwingAny(SWING_EXTERNAL, true, s))
+      EnsureHLine(g_objPrefix + "LQ_EXT_HIGH", s.price, (s.broken ? clrDarkGray : clrWhite), STYLE_DASH);
+   if(GetLatestSwingAny(SWING_EXTERNAL, false, s))
+      EnsureHLine(g_objPrefix + "LQ_EXT_LOW", s.price, (s.broken ? clrDarkGray : clrWhite), STYLE_DASH);
+}
+
+void DrawDisplacementLeg()
+{
+   if(!InpShowDisplacementLeg || !g_lastDisplacement.valid) return;
+   if(g_lastDisplacement.impulseStartBar < 0 || g_lastDisplacement.impulseEndBar < 0) return;
+   datetime t1=iTime(_Symbol, InpSignalTF, g_lastDisplacement.impulseStartBar);
+   datetime t2=iTime(_Symbol, InpSignalTF, g_lastDisplacement.impulseEndBar);
+   if(t1<=0 || t2<=0) return;
+
+   color c=(g_lastDisplacement.direction==1?clrLimeGreen:clrOrangeRed);
+   string dir=(g_lastDisplacement.direction==1?"BUY":"SELL");
+   string nm=g_objPrefix + "DISP_LEG_" + dir + "_" + IntegerToString((int)g_lastDisplacement.time);
+   EnsureTrendLine(nm, t1, g_lastDisplacement.impulseStart, t2, g_lastDisplacement.impulseEnd, c, STYLE_SOLID, 2, false);
+}
+
+void DrawTradeSetupObjects()
+{
+   if(InpShowFVG && g_lastFVG.valid){ datetime t2=iTime(_Symbol,InpSignalTF,0)+PeriodSeconds(InpSignalTF)*8; EnsureRectangle(g_objPrefix+"SETUP_FVG_"+IntegerToString((int)g_lastFVG.timeEnd),g_lastFVG.timeStart,g_lastFVG.upper,t2,g_lastFVG.lower,(g_lastFVG.direction==1?clrLightBlue:clrLightCoral)); }
+   if(InpShowOTE && g_oteZone.valid){ datetime t2=iTime(_Symbol,InpSignalTF,0)+PeriodSeconds(InpSignalTF)*6; EnsureRectangle(g_objPrefix+"SETUP_OTE_"+IntegerToString((int)iTime(_Symbol,InpSignalTF,1)),iTime(_Symbol,InpSignalTF,1),g_oteZone.upper,t2,g_oteZone.lower,clrGold); }
+
+   if(InpShowEntry && g_currentSetup.valid)
+   {
+      string dir=(g_currentSetup.direction==1?"BUY":"SELL");
+      string tag=g_objPrefix+"SETUP_"+dir+"_"+IntegerToString((int)g_currentSetup.signalTime);
+      EnsureHLine(tag+"_ENTRY",g_currentSetup.entryPrice,clrLime,STYLE_DOT);
+      EnsureHLine(tag+"_SL",g_currentSetup.stopLoss,clrRed,STYLE_DOT);
+      EnsureHLine(tag+"_TP1",g_currentSetup.takeProfit1,clrAqua,STYLE_DOT);
+      EnsureHLine(tag+"_TP2",g_currentSetup.takeProfit2,clrLime,STYLE_DOT);
+
+      if(InpShowTradeReasonLabels)
+      {
+         datetime tLabel=iTime(_Symbol,InpSignalTF,0);
+         if(tLabel<=0) tLabel=TimeCurrent();
+         EnsureTextStyled(tag+"_REASON", tLabel, g_currentSetup.entryPrice, g_currentSetup.reason, clrWhite, 8);
+      }
+   }
+}
 
 void DrawICTObjects()
 {
    if(InpShowSwings){ DrawSwingArray(g_internalSwings,g_internalCount,"ISW_",clrSilver); DrawSwingArray(g_externalSwings,g_externalCount,"ESW_",clrWhite); }
-   if(InpShowBOSCHoCH && g_lastStructure.valid){ string nm=g_objPrefix+"STRUCT"; EnsureHLine(nm,g_lastStructure.level,(g_lastStructure.direction==1?clrDodgerBlue:clrOrangeRed),STYLE_DASH); EnsureText(g_objPrefix+"STRUCT_TXT", g_lastStructure.time, g_lastStructure.level, StructureTypeToString(g_lastStructure.type)); }
-   if(InpShowSweep && g_lastSweep.valid){ double px=(g_lastSweep.direction==1?g_lastSweep.sweepLow:g_lastSweep.sweepHigh); EnsureArrow(g_objPrefix+"SWEEP",g_lastSweep.time,px,241,clrYellow); EnsureText(g_objPrefix+"SWEEP_TXT",g_lastSweep.time,px,(g_lastSweep.direction==1?"SSL Sweep":"BSL Sweep")); }
-   if(InpShowFVG && g_lastFVG.valid){ datetime t2=iTime(_Symbol,InpSignalTF,0)+PeriodSeconds(InpSignalTF)*8; EnsureRectangle(g_objPrefix+"FVG",g_lastFVG.timeStart,g_lastFVG.upper,t2,g_lastFVG.lower,(g_lastFVG.direction==1?clrLightBlue:clrLightCoral)); }
-   if(InpShowOTE && g_oteZone.valid){ datetime t2=iTime(_Symbol,InpSignalTF,0)+PeriodSeconds(InpSignalTF)*6; EnsureRectangle(g_objPrefix+"OTE",iTime(_Symbol,InpSignalTF,1),g_oteZone.upper,t2,g_oteZone.lower,clrGold); }
-   if(InpShowEntry && g_currentSetup.valid){ EnsureHLine(g_objPrefix+"ENTRY",g_currentSetup.entryPrice,clrLime,STYLE_DOT); EnsureHLine(g_objPrefix+"SL",g_currentSetup.stopLoss,clrRed,STYLE_DOT); EnsureHLine(g_objPrefix+"TP1",g_currentSetup.takeProfit1,clrLime,STYLE_DOT); EnsureHLine(g_objPrefix+"TP2",g_currentSetup.takeProfit2,clrLime,STYLE_DOT); }
+   DrawStructureEvent();
+   DrawSweepEvent();
+   DrawLiquidityLevels();
+   DrawDisplacementLeg();
+   DrawTradeSetupObjects();
 }
 
 void DeleteAllICTObjects(){ int total=ObjectsTotal(0); for(int i=total-1;i>=0;i--){ string nm=ObjectName(0,i); if(StringFind(nm,g_objPrefix)==0) ObjectDelete(0,nm); } }
