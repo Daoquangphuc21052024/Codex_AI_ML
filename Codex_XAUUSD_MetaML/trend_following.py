@@ -349,36 +349,59 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     actions = resolve_actions(test_prob_buy, test_prob_sell, test_buy_thr, test_sell_thr, edge_margin)
     act_diag = action_semantic_diagnostics(actions, te_buy, te_sell)
 
-    test_ds = data.loc[teX.index, ["open", "high", "low", "close"]].copy()
-    test_ds["spread"] = data.loc[teX.index, "spread"] if "spread" in data.columns else 0.0
-    test_ds["prob_buy"] = test_prob_buy
-    test_ds["prob_sell"] = test_prob_sell
+    def _run_backtest_for_split(split_name: str, idx: pd.Index, prob_buy: np.ndarray, prob_sell: np.ndarray, buy_thr, sell_thr):
+        ds = data.loc[idx, ["open", "high", "low", "close"]].copy()
+        ds["spread"] = data.loc[idx, "spread"] if "spread" in data.columns else 0.0
+        ds["prob_buy"] = prob_buy
+        ds["prob_sell"] = prob_sell
+        split_trades, split_metrics = backtest_probabilities(
+            ds,
+            stop=HP.stop_loss,
+            take=HP.take_profit,
+            markup=0.0,
+            buy_threshold=buy_thr,
+            sell_threshold=sell_thr,
+            edge_margin=edge_margin,
+            max_hold=HP.label_max_hold,
+            signal_shift=0,
+            conflict_mode="no_trade",
+            allow_overlap=False,
+            entry_mode=HP.label_entry_mode,
+            spread_points=HP.spread_points,
+            commission=HP.commission,
+            slippage_points=HP.slippage_points,
+            use_spread_column=True,
+            same_bar_conflict=HP.label_same_bar_conflict,
+            barrier_type="atr",
+            atr_window=HP.atr_window,
+            tp_atr_buy=HP.label_tp_buy_atr,
+            sl_atr_buy=HP.label_sl_buy_atr,
+            tp_atr_sell=HP.label_tp_sell_atr,
+            sl_atr_sell=HP.label_sl_sell_atr,
+        )
+        return split_trades, split_metrics
 
-    trades_df, trading_metrics = backtest_probabilities(
-        test_ds,
-        stop=HP.stop_loss,
-        take=HP.take_profit,
-        markup=0.0,
-        buy_threshold=test_buy_thr,
-        sell_threshold=test_sell_thr,
-        edge_margin=edge_margin,
-        max_hold=HP.label_max_hold,
-        signal_shift=0,
-        conflict_mode="no_trade",
-        allow_overlap=False,
-        entry_mode=HP.label_entry_mode,
-        spread_points=HP.spread_points,
-        commission=HP.commission,
-        slippage_points=HP.slippage_points,
-        use_spread_column=True,
-        same_bar_conflict=HP.label_same_bar_conflict,
-        barrier_type="atr",
-        atr_window=HP.atr_window,
-        tp_atr_buy=HP.label_tp_buy_atr,
-        sl_atr_buy=HP.label_sl_buy_atr,
-        tp_atr_sell=HP.label_tp_sell_atr,
-        sl_atr_sell=HP.label_sl_sell_atr,
+    train_prob_buy = model_buy.predict_proba(trX_s)[:, 1]
+    train_prob_sell = model_sell.predict_proba(trX_s)[:, 1]
+    val_prob_buy_bt = model_buy.predict_proba(vaX_s)[:, 1]
+    val_prob_sell_bt = model_sell.predict_proba(vaX_s)[:, 1]
+
+    train_buy_thr, train_sell_thr = _regime_thresholds(
+        buy_t,
+        sell_t,
+        regime_bull=data.loc[trX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=trX.index),
+        regime_bear=data.loc[trX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=trX.index),
     )
+    val_buy_thr, val_sell_thr = _regime_thresholds(
+        buy_t,
+        sell_t,
+        regime_bull=data.loc[vaX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=vaX.index),
+        regime_bear=data.loc[vaX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=vaX.index),
+    )
+
+    train_trades_df, train_trading_metrics = _run_backtest_for_split("train", trX.index, train_prob_buy, train_prob_sell, train_buy_thr, train_sell_thr)
+    val_trades_df, val_trading_metrics = _run_backtest_for_split("val", vaX.index, val_prob_buy_bt, val_prob_sell_bt, val_buy_thr, val_sell_thr)
+    trades_df, trading_metrics = _run_backtest_for_split("test", teX.index, test_prob_buy, test_prob_sell, test_buy_thr, test_sell_thr)
 
     split_markers = {
         "train_start": trX.index.min(),
@@ -389,11 +412,28 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "test_end": teX.index.max(),
     }
     save_backtest_reports(
+        train_trades_df,
+        HP.symbol,
+        out_dir="reports",
+        full_close=data["close"],
+        split_markers=split_markers,
+        tag="_train",
+    )
+    save_backtest_reports(
+        val_trades_df,
+        HP.symbol,
+        out_dir="reports",
+        full_close=data["close"],
+        split_markers=split_markers,
+        tag="_val",
+    )
+    save_backtest_reports(
         trades_df,
         HP.symbol,
         out_dir="reports",
         full_close=data["close"],
         split_markers=split_markers,
+        tag="_test",
     )
     save_dual_classification_reports(te_buy, te_sell, test_prob_buy, test_prob_sell, HP.symbol, out_dir="reports")
     save_feature_importance(model_buy, selected, HP.symbol, out_dir="reports", top_n=20, tag="_buy", feature_groups=feature_groups)
@@ -486,7 +526,11 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "label_diagnostics_by_split": label_diag,
         "dual_classification_metrics": dual_cls,
         "action_diagnostics": act_diag,
-        "trading_metrics": trading_metrics,
+        "trading_metrics": {
+            "train": train_trading_metrics,
+            "val": val_trading_metrics,
+            "test": trading_metrics,
+        },
         "threshold_optimization": {
             "best_candidate": best_thr,
             "top_candidates": thr_table.head(20).to_dict(orient="records"),
@@ -501,6 +545,10 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
 
     with open("reports/run_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+    with open("reports/trading_metrics_train.json", "w", encoding="utf-8") as f:
+        json.dump(train_trading_metrics, f, indent=2)
+    with open("reports/trading_metrics_val.json", "w", encoding="utf-8") as f:
+        json.dump(val_trading_metrics, f, indent=2)
     with open("reports/trading_metrics_test.json", "w", encoding="utf-8") as f:
         json.dump(trading_metrics, f, indent=2)
     with open("reports/classification_metrics_dual_test.json", "w", encoding="utf-8") as f:

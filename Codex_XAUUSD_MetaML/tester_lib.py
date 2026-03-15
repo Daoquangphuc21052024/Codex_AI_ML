@@ -353,6 +353,7 @@ def save_backtest_reports(
     out_dir: str = "reports",
     full_close: pd.Series | None = None,
     split_markers: dict[str, pd.Timestamp] | None = None,
+    tag: str = "",
 ) -> dict[str, str]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     if trades_df.empty:
@@ -373,7 +374,9 @@ def save_backtest_reports(
             if trades_df["exit_time"].min() <= ts <= trades_df["exit_time"].max():
                 ax.axvline(ts, linestyle="--", linewidth=1, alpha=0.75)
                 ax.text(ts, np.nanmax(eq), name, fontsize=8, rotation=90, va="top", ha="right")
-    p = f"{out_dir}/{symbol}_equity_curve.png"
+    file_prefix = f"{symbol}{tag}"
+
+    p = f"{out_dir}/{file_prefix}_equity_curve.png"
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     paths["equity_png"] = p
@@ -381,7 +384,7 @@ def save_backtest_reports(
     fig, ax = plt.subplots(figsize=(10, 3))
     ax.fill_between(trades_df["exit_time"], dd.to_numpy(), 0, color="#d62728", alpha=0.4)
     ax.set_title(f"{symbol} Drawdown")
-    p = f"{out_dir}/{symbol}_drawdown_curve.png"
+    p = f"{out_dir}/{file_prefix}_drawdown_curve.png"
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     paths["drawdown_png"] = p
@@ -391,7 +394,7 @@ def save_backtest_reports(
     ax.plot(trades_df["exit_time"], rolling_win, color="#2ca02c")
     ax.set_ylim(0, 1)
     ax.set_title(f"{symbol} Rolling Win Rate (30)")
-    p = f"{out_dir}/{symbol}_rolling_winrate.png"
+    p = f"{out_dir}/{file_prefix}_rolling_winrate.png"
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     paths["rolling_winrate_png"] = p
@@ -400,19 +403,19 @@ def save_backtest_reports(
     fig, ax = plt.subplots(figsize=(10, 3))
     ax.plot(trades_df["exit_time"], rolling_pnl, color="#9467bd")
     ax.set_title(f"{symbol} Rolling PnL (30)")
-    p = f"{out_dir}/{symbol}_rolling_pnl.png"
+    p = f"{out_dir}/{file_prefix}_rolling_pnl.png"
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     paths["rolling_pnl_png"] = p
 
-    trades_df.to_csv(f"{out_dir}/{symbol}_trade_log.csv", index=False)
+    trades_df.to_csv(f"{out_dir}/{file_prefix}_trade_log.csv", index=False)
     monthly_base = trades_df.copy()
     monthly_base["exit_time"] = pd.to_datetime(monthly_base["exit_time"], errors="coerce")
     monthly = monthly_base.dropna(subset=["exit_time"]).set_index("exit_time")["pnl"].resample("ME").agg(["sum", "count", "mean"])
-    monthly.to_csv(f"{out_dir}/{symbol}_monthly_summary.csv")
+    monthly.to_csv(f"{out_dir}/{file_prefix}_monthly_summary.csv")
 
     by_side = trades_df.groupby("side")["pnl"].sum().rename("pnl")
-    by_side.to_csv(f"{out_dir}/{symbol}_pnl_by_side.csv")
+    by_side.to_csv(f"{out_dir}/{file_prefix}_pnl_by_side.csv")
 
     if full_close is not None and len(full_close) > 0:
         timeline = full_close.dropna().copy()
@@ -430,12 +433,50 @@ def save_backtest_reports(
 
         ax.set_title(f"{symbol} Full Timeline with Train/Val/Test Milestones")
         ax.legend(loc="best")
-        p = f"{out_dir}/{symbol}_full_timeline_splits.png"
+        p = f"{out_dir}/{file_prefix}_full_timeline_splits.png"
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
         paths["full_timeline_splits_png"] = p
 
-    paths["trade_log_csv"] = f"{out_dir}/{symbol}_trade_log.csv"
-    paths["monthly_summary_csv"] = f"{out_dir}/{symbol}_monthly_summary.csv"
-    paths["pnl_by_side_csv"] = f"{out_dir}/{symbol}_pnl_by_side.csv"
+    if split_markers:
+        eq_plot = trades_df.copy()
+        eq_plot["exit_time"] = pd.to_datetime(eq_plot["exit_time"], errors="coerce")
+        eq_plot = eq_plot.dropna(subset=["exit_time"]).sort_values("exit_time")
+        if not eq_plot.empty:
+            if "cum_pnl" not in eq_plot.columns:
+                eq_plot["cum_pnl"] = eq_plot["pnl"].cumsum()
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(eq_plot["exit_time"], eq_plot["cum_pnl"], color="#1f77b4", linewidth=1.2, label="equity")
+
+            train_start = pd.to_datetime(split_markers.get("train_start")) if split_markers.get("train_start") is not None else pd.NaT
+            train_end = pd.to_datetime(split_markers.get("train_end")) if split_markers.get("train_end") is not None else pd.NaT
+            val_start = pd.to_datetime(split_markers.get("val_start")) if split_markers.get("val_start") is not None else pd.NaT
+            val_end = pd.to_datetime(split_markers.get("val_end")) if split_markers.get("val_end") is not None else pd.NaT
+            test_start = pd.to_datetime(split_markers.get("test_start")) if split_markers.get("test_start") is not None else pd.NaT
+            test_end = pd.to_datetime(split_markers.get("test_end")) if split_markers.get("test_end") is not None else pd.NaT
+
+            if pd.notna(train_start) and pd.notna(train_end):
+                ax.axvspan(train_start, train_end, color="#2ca02c", alpha=0.08, label="train")
+            if pd.notna(val_start) and pd.notna(val_end):
+                ax.axvspan(val_start, val_end, color="#ff7f0e", alpha=0.08, label="val")
+            if pd.notna(test_start) and pd.notna(test_end):
+                ax.axvspan(test_start, test_end, color="#d62728", alpha=0.08, label="test")
+
+            for name, ts in split_markers.items():
+                ts = pd.to_datetime(ts)
+                if pd.isna(ts):
+                    continue
+                ax.axvline(ts, linestyle="--", linewidth=0.9, color="gray", alpha=0.75)
+                ax.text(ts, float(eq_plot["cum_pnl"].max()), name, fontsize=8, rotation=90, va="top", ha="right")
+
+            ax.set_title(f"{symbol} Split Visualization Equity Curve")
+            ax.legend(loc="best")
+            split_png = f"{out_dir}/split_visualization_equity_curve.png"
+            fig.savefig(split_png, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            paths["split_visualization_equity_curve_png"] = split_png
+
+    paths["trade_log_csv"] = f"{out_dir}/{file_prefix}_trade_log.csv"
+    paths["monthly_summary_csv"] = f"{out_dir}/{file_prefix}_monthly_summary.csv"
+    paths["pnl_by_side_csv"] = f"{out_dir}/{file_prefix}_pnl_by_side.csv"
     return paths
