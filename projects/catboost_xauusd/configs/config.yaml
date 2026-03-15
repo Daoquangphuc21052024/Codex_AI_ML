@@ -1,0 +1,34 @@
+mt5:
+  symbol: "XAUUSD"
+  timeframe: "H1"
+  bars: 12000
+  timezone: "UTC"
+  login: null
+  password: null
+  server: null
+
+labeling:
+  horizon_bars: 12
+  tp_points: [2.0, 3.0, 5.0]
+  sl_points: [2.0, 3.0, 5.0]
+  tie_breaker: "sl_priority"
+
+features:
+  max_features: 15
+  windows: [6, 12, 24]
+  corr_threshold: 0.85
+
+train:
+  n_splits: 5
+  min_train_size: 3000
+  val_size: 500
+  test_size: 500
+  random_state: 42
+  tuning_trials: 12
+  threshold_no_trade: 0.55
+
+paths:
+  raw_data: "projects/catboost_xauusd/data/raw_xauusd_h1.csv"
+  reports_dir: "projects/catboost_xauusd/reports"
+  artifacts_dir: "projects/catboost_xauusd/artifacts"
+  logs_dir: "projects/catboost_xauusd/logs"
