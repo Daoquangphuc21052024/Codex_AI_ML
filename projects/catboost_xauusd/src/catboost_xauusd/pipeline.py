@@ -30,7 +30,7 @@ def run(config_path: str) -> None:
         if not cfg.mt5.csv_path:
             raise ValueError("mt5.csv_path is required when mt5.source=csv")
         raw_df = pd.read_csv(cfg.mt5.csv_path)
-        logger.info("Loaded %d bars from CSV source: %s", len(raw_df), cfg.mt5.csv_path)
+        logger.info("Loaded %d rows from CSV source: %s", len(raw_df), cfg.mt5.csv_path)
     else:
         raise ValueError(f"Unsupported mt5.source={cfg.mt5.source}")
 

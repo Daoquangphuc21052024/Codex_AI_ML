@@ -71,7 +71,7 @@ class MT5Connector:
             df = pd.DataFrame(rates)
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
             self.logger.info(
-                "Fetched %d bars for %s from %s to %s",
+                "Fetched %d rows for %s from %s to %s",
                 len(df),
                 self.config.symbol,
                 utc_from.isoformat(),

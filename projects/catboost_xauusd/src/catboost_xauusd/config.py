@@ -95,10 +95,24 @@ def resolve_config_path(config_path: str | Path) -> Path:
     )
 
 
+
+
+def _reject_legacy_keys(raw: dict[str, Any]) -> None:
+    mt5_legacy = [k for k in ["bars"] if k in raw.get("mt5", {})]
+    train_legacy = [k for k in ["min_train_size", "val_size", "test_size"] if k in raw.get("train", {})]
+    if mt5_legacy or train_legacy:
+        raise ValueError(
+            "Detected legacy config keys from v0.1.x that are no longer supported. "
+            f"mt5 legacy keys: {mt5_legacy or 'none'}, train legacy keys: {train_legacy or 'none'}. "
+            "Please migrate to v0.3.0 config schema using start_utc/end_utc and day-based walk-forward windows."
+        )
+
 def load_config(config_path: str | Path) -> AppConfig:
     resolved = resolve_config_path(config_path)
     with resolved.open("r", encoding="utf-8") as file:
         raw: dict[str, Any] = yaml.safe_load(file)
+
+    _reject_legacy_keys(raw)
 
     return AppConfig(
         mt5=MT5Config(**raw["mt5"]),
