@@ -46,9 +46,10 @@ def main() -> None:
         cfg["train"].update(
             {
                 "n_splits": 2,
-                "min_train_size": 800,
-                "val_size": 200,
-                "test_size": 200,
+                "min_train_days": 20,
+                "val_days": 5,
+                "test_days": 5,
+                "step_days": 5,
                 "tuning_trials": 2,
                 "iterations": 60,
             }

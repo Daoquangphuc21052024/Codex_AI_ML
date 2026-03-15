@@ -12,8 +12,9 @@ class MT5Config:
     source: str
     symbol: str
     timeframe: str
-    bars: int
     timezone: str
+    start_utc: str | None
+    end_utc: str | None
     login: int | None
     password: str | None
     server: str | None
@@ -38,9 +39,10 @@ class FeatureConfig:
 @dataclass(frozen=True)
 class TrainConfig:
     n_splits: int
-    min_train_size: int
-    val_size: int
-    test_size: int
+    min_train_days: int
+    val_days: int
+    test_days: int
+    step_days: int
     random_state: int
     tuning_trials: int
     iterations: int

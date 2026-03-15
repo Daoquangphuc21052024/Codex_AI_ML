@@ -1,6 +1,6 @@
 # CatBoost XAUUSD H1 MT5 Pipeline (Production-style)
 
-End-to-end Python project for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
+End-to-end Python project (v0.2.0) for training a **multi-class CatBoostClassifier** on **XAUUSD H1** from **MetaTrader5 broker API**, with strict anti-leakage time-series workflow and ONNX export for MT5 inference.
 
 ## Objectives
 
@@ -54,10 +54,10 @@ pip install -r requirements.txt
 
 Edit `configs/config.yaml`:
 
-- `mt5`: source (`mt5` or `csv`), symbol/timeframe/bars + optional login credentials + `csv_path` fallback
+- `mt5`: source (`mt5` or `csv`), symbol/timeframe + `start_utc/end_utc` time range (không fix cứng số bars), optional login credentials, and `csv_path` fallback
 - `labeling`: `horizon_bars`, `tp_points[]`, `sl_points[]`, tie-breaker when same bar hits TP/SL
 - `features`: rolling windows, max features, correlation threshold
-- `train`: walk-forward split sizes, random seed, no-trade threshold
+- `train`: walk-forward theo thời gian (`min_train_days`, `val_days`, `test_days`, `step_days`), random seed, no-trade threshold
 - `paths`: output locations
 
 
@@ -81,7 +81,7 @@ python run_pipeline.py --config configs/config.yaml
 
 1. Features are only based on historical bars up to current index (rolling/pct_change/shift).
 2. Labels use only **future horizon bars** and are truncated to avoid incomplete horizons.
-3. Walk-forward split preserves chronology: `train -> val -> test` by time.
+3. Walk-forward split preserves chronology by **calendar time windows**: `train(min_train_days) -> val(val_days) -> test(test_days)` with rolling `step_days`.
 4. Hyperparameter tuning uses train/val of each fold only.
 5. Backtest evaluates only fold test predictions.
 

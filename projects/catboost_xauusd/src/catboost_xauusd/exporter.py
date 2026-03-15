@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 from catboost import CatBoostClassifier
 
+from . import __version__
+
 
 def export_artifacts(
     model: CatBoostClassifier,
@@ -21,6 +23,7 @@ def export_artifacts(
 
     schema = {
         "model_name": "catboost_xauusd_h1_multiclass",
+        "pipeline_version": __version__,
         "input_name": "features",
         "feature_order": feature_cols,
         "feature_count": len(feature_cols),

@@ -2,8 +2,9 @@ mt5:
   source: "mt5"
   symbol: "XAUUSD"
   timeframe: "H1"
-  bars: 12000
   timezone: "UTC"
+  start_utc: "2021-01-01T00:00:00Z"
+  end_utc: null
   login: null
   password: null
   server: null
@@ -22,9 +23,10 @@ features:
 
 train:
   n_splits: 5
-  min_train_size: 3000
-  val_size: 500
-  test_size: 500
+  min_train_days: 180
+  val_days: 30
+  test_days: 30
+  step_days: 30
   random_state: 42
   tuning_trials: 12
   iterations: 500

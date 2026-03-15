@@ -20,6 +20,21 @@ class MT5Connector:
             raise ValueError(f"Unsupported timeframe: {self.config.timeframe}")
         return int(getattr(mt5_module, attr))
 
+    def _resolve_timerange(self) -> tuple[datetime, datetime]:
+        utc_to = (
+            datetime.fromisoformat(self.config.end_utc.replace("Z", "+00:00"))
+            if self.config.end_utc
+            else datetime.now(timezone.utc)
+        )
+        utc_from = (
+            datetime.fromisoformat(self.config.start_utc.replace("Z", "+00:00"))
+            if self.config.start_utc
+            else utc_to.replace(year=utc_to.year - 3)
+        )
+        if utc_from >= utc_to:
+            raise ValueError("mt5.start_utc must be earlier than mt5.end_utc")
+        return utc_from, utc_to
+
     def fetch_rates(self) -> pd.DataFrame:
         try:
             import MetaTrader5 as mt5
@@ -43,19 +58,25 @@ class MT5Connector:
                     raise RuntimeError(f"MT5 login failed: {mt5.last_error()}")
 
             timeframe = self._resolve_timeframe(mt5)
-            utc_to = datetime.now(timezone.utc)
-            rates = mt5.copy_rates_from(
+            utc_from, utc_to = self._resolve_timerange()
+            rates = mt5.copy_rates_range(
                 self.config.symbol,
                 timeframe,
+                utc_from,
                 utc_to,
-                self.config.bars,
             )
             if rates is None or len(rates) == 0:
                 raise RuntimeError(f"No rates returned: {mt5.last_error()}")
 
             df = pd.DataFrame(rates)
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            self.logger.info("Fetched %d bars for %s", len(df), self.config.symbol)
+            self.logger.info(
+                "Fetched %d bars for %s from %s to %s",
+                len(df),
+                self.config.symbol,
+                utc_from.isoformat(),
+                utc_to.isoformat(),
+            )
             return df
         finally:
             mt5.shutdown()
