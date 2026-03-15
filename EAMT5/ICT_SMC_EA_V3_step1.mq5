@@ -327,12 +327,13 @@ input bool             InpAllowPending      = true;
 input int              InpPendingExpiryBars = 6;
 
 input group "=== SESSION ==="
-input bool               InpUseSessionFilter = true;
-input ENUM_TRADE_SESSION InpTradeSession     = SESSION_BOTH;
-input int                InpLondonStart      = 8;
+input int                InpGMTOffset        = 3; // FIX-3
 input int                InpLondonEnd        = 12;
-input int                InpNewYorkStart     = 13;
+input int                InpLondonStart      = 8;
 input int                InpNewYorkEnd       = 18;
+input int                InpNewYorkStart     = 13;
+input ENUM_TRADE_SESSION InpTradeSession     = SESSION_BOTH;
+input bool               InpUseSessionFilter = true;
 
 input group "=== RISK MANAGEMENT ==="
 input ENUM_RISK_MODE     InpRiskMode         = RISK_PERCENT;
@@ -351,6 +352,7 @@ input double             InpTrailingATRMult  = 1.5;
 
 input group "=== FILTERS ==="
 input int  InpMaxSpreadPoints          = 30;
+input bool InpRequireHTFBias           = true; // FIX-2
 input bool InpUsePremiumDiscountFilter = false;
 
 input group "=== VISUALIZATION ==="
@@ -941,7 +943,8 @@ bool GetLastTwoSwingFromArray(SwingPoint &arr[], int count, bool wantHigh, Swing
 //============================================================
 // STATE MACHINE + TRADE BUILD
 //============================================================
-int BarsSinceTime(datetime t){ if(t<=0) return 9999; int shift=iBarShift(_Symbol,InpSignalTF,t,true); if(shift<0) return 9999; return shift; }
+int BarsSinceTime(datetime t){ if(t<=0) return 9999; int shift=iBarShift(_Symbol,InpSignalTF,t,false); // FIX-1
+   if(shift<0) return 9999; return shift; }
 bool IsContextExpired(SetupContext &ctx, int maxBars){ if(ctx.startedAt<=0) return false; return (BarsSinceTime(ctx.startedAt) > maxBars); }
 
 void UpdateSetupContext(SetupContext &ctx)
@@ -970,7 +973,7 @@ void UpdateSetupContext(SetupContext &ctx)
             ctx.displacement=g_lastDisplacement;
             if(InpUseFVG)
             {
-               if(!(g_lastFVG.valid && g_lastFVG.direction==ctx.direction && g_lastFVG.timeEnd>=ctx.structure.time)) break;
+               if(!(g_lastFVG.valid && g_lastFVG.direction==ctx.direction && g_lastFVG.barIndex <= (ctx.displacement.barIndex + 1))) break; // FIX-5
                ctx.fvg=g_lastFVG;
             }
             if(InpUseOTE)
@@ -1008,8 +1011,8 @@ void UpdateSetupContext(SetupContext &ctx)
 void BuildTradeSetup()
 {
    g_currentSetup.valid=false;
-   if(InpAllowBuy && g_buyCtx.state==SETUP_ENTRY_READY && g_buyCtx.trade.valid && (g_htfBias==BIAS_BULLISH || g_htfBias==BIAS_NONE)) g_currentSetup=g_buyCtx.trade;
-   if(!g_currentSetup.valid && InpAllowSell && g_sellCtx.state==SETUP_ENTRY_READY && g_sellCtx.trade.valid && (g_htfBias==BIAS_BEARISH || g_htfBias==BIAS_NONE)) g_currentSetup=g_sellCtx.trade;
+   if(InpAllowBuy && g_buyCtx.state==SETUP_ENTRY_READY && g_buyCtx.trade.valid && (!InpRequireHTFBias || g_htfBias==BIAS_BULLISH)) g_currentSetup=g_buyCtx.trade; // FIX-2
+   if(!g_currentSetup.valid && InpAllowSell && g_sellCtx.state==SETUP_ENTRY_READY && g_sellCtx.trade.valid && (!InpRequireHTFBias || g_htfBias==BIAS_BEARISH)) g_currentSetup=g_sellCtx.trade; // FIX-2
 }
 
 string BuildReasonText(SetupContext &ctx)
@@ -1039,12 +1042,14 @@ void BuildTradeFromContext(SetupContext &ctx)
          if(InpEntryMode==ENTRY_MID_FVG) entryPrice=fvgMid; else if(InpEntryMode==ENTRY_NEAR_FVG) entryPrice=ctx.fvg.upper; else entryPrice=MathMin(marketPrice,fvgMid);
          bool inside=(marketPrice>=ctx.fvg.lower && marketPrice<=ctx.fvg.upper), above=(marketPrice>ctx.fvg.upper);
          if(inside){ entryPrice=marketPrice; usePending=false; } else if(above && InpAllowPending){ usePending=true; } else return;
+         if(usePending && entryPrice >= g_symbol.Ask()) return; // FIX-4
       }
       else
       {
          if(InpEntryMode==ENTRY_MID_FVG) entryPrice=fvgMid; else if(InpEntryMode==ENTRY_NEAR_FVG) entryPrice=ctx.fvg.lower; else entryPrice=MathMax(marketPrice,fvgMid);
          bool inside=(marketPrice>=ctx.fvg.lower && marketPrice<=ctx.fvg.upper), below=(marketPrice<ctx.fvg.lower);
          if(inside){ entryPrice=marketPrice; usePending=false; } else if(below && InpAllowPending){ usePending=true; } else return;
+         if(usePending && entryPrice <= g_symbol.Bid()) return; // FIX-4
       }
    }
    else { entryPrice=marketPrice; usePending=false; }
@@ -1229,7 +1234,8 @@ void ManageOrdersAndPositions(){ g_symbol.RefreshRates(); ManagePositions(); Man
 bool CheckSessionFilter()
 {
    if(!InpUseSessionFilter) return true;
-   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt); int h=dt.hour;
+   MqlDateTime dt; datetime gmtTime = TimeCurrent() - InpGMTOffset * 3600; // FIX-3
+   TimeToStruct(gmtTime, dt); int h=dt.hour;
    bool inLondon=(h>=InpLondonStart && h<InpLondonEnd), inNewYork=(h>=InpNewYorkStart && h<InpNewYorkEnd);
    if(InpTradeSession==SESSION_LONDON) return inLondon;
    if(InpTradeSession==SESSION_NEWYORK) return inNewYork;
