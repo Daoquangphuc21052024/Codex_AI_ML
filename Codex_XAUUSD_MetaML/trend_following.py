@@ -16,7 +16,7 @@ from sklearn.preprocessing import RobustScaler
 from data_lib import build_split_visualization, generate_synthetic_ohlc, read_price_csv
 from evaluation_lib import classification_metrics, optimize_threshold, save_classification_reports, save_feature_importance
 from export_lib import export_artifacts
-from features_lib import build_features
+from features_lib import build_features, select_main_features_train_only
 from labeling_lib import SEED, create_labels, evaluate_label_quality
 from search_lib import run_param_search
 from tester_lib import backtest_signals, save_backtest_reports
@@ -155,6 +155,36 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     y_main = data["labels"].astype(int)
     y_meta = data["meta_target"].astype(int)
 
+    train_X_raw, train_y_raw, val_X_raw, val_y, test_X_raw, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
+    train_Xm_raw, train_ym, val_Xm_raw, val_ym, test_Xm_raw, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
+
+    fs_result = select_main_features_train_only(
+        X_train=train_X_raw,
+        y_train=train_y_raw,
+        feature_names=main_features,
+        corr_threshold=0.96,
+        min_features=16,
+        random_seed=SEED,
+    )
+    main_features = fs_result.selected_features
+    fs_result.importance_table.to_csv("reports/feature_selection_importance.csv", index=False)
+    with open("reports/feature_selection_summary.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "n_original": len(X_main.columns),
+                "n_selected": len(main_features),
+                "removed_zero_importance": fs_result.removed_zero_importance,
+                "removed_high_correlation": fs_result.removed_high_correlation,
+                "selected_features": main_features,
+            },
+            f,
+            indent=2,
+        )
+
+    X_main = X_main[main_features]
+    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
+    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
+
     if run_search:
         search_space = {
             "depth": [4, 6, 8],
@@ -174,9 +204,6 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         )
     else:
         best_params = {"depth": 6, "learning_rate": 0.05, "l2_leaf_reg": 3.0, "iterations": HP.main_iterations}
-
-    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
-    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
 
     train_X_s, val_X_s, test_X_s, train_Xm_s, val_Xm_s, test_Xm_s, scaler_main, scaler_meta = _normalize_features(
         train_X, val_X, test_X, train_Xm, val_Xm, test_Xm
@@ -281,6 +308,11 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "val_period": {"start": str(val_X.index.min()), "end": str(val_X.index.max())},
         "test_period": {"start": str(test_X.index.min()), "end": str(test_X.index.max())},
         "seed": SEED,
+        "feature_selection": {
+            "removed_zero_importance": fs_result.removed_zero_importance,
+            "removed_high_correlation": fs_result.removed_high_correlation,
+            "selected_features": main_features,
+        },
     }
 
     exported = export_artifacts(
