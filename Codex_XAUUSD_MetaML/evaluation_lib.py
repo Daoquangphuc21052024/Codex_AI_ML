@@ -48,6 +48,12 @@ def evaluate_dual_classification(
 ) -> dict:
     pred_buy = (prob_buy >= buy_threshold).astype(int)
     pred_sell = (prob_sell >= sell_threshold).astype(int)
+    buy_precision = float(precision_score(y_buy, pred_buy, zero_division=0))
+    buy_recall = float(recall_score(y_buy, pred_buy, zero_division=0))
+    buy_f1 = float(f1_score(y_buy, pred_buy, zero_division=0))
+    sell_precision = float(precision_score(y_sell, pred_sell, zero_division=0))
+    sell_recall = float(recall_score(y_sell, pred_sell, zero_division=0))
+    sell_f1 = float(f1_score(y_sell, pred_sell, zero_division=0))
 
     return {
         "auc_buy": _safe_auc(y_buy, prob_buy),
@@ -56,6 +62,14 @@ def evaluate_dual_classification(
         "pr_auc_sell": _safe_pr_auc(y_sell, prob_sell),
         "brier_buy": float(brier_score_loss(y_buy, prob_buy)),
         "brier_sell": float(brier_score_loss(y_sell, prob_sell)),
+        "precision_buy": buy_precision,
+        "recall_buy": buy_recall,
+        "f1_buy": buy_f1,
+        "precision_sell": sell_precision,
+        "recall_sell": sell_recall,
+        "f1_sell": sell_f1,
+        "predicted_positive_rate_buy": float(pred_buy.mean()),
+        "predicted_positive_rate_sell": float(pred_sell.mean()),
         "confusion_buy": confusion_matrix(y_buy, pred_buy, labels=[0, 1]).tolist(),
         "confusion_sell": confusion_matrix(y_sell, pred_sell, labels=[0, 1]).tolist(),
         "buy_threshold": float(buy_threshold),

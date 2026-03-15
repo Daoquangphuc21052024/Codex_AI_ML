@@ -46,7 +46,9 @@ class HyperParams:
     min_total_trades: int = 120
     min_buy_trades: int = 20
     min_sell_trades: int = 20
+    max_no_trade_ratio: float = 0.92
     max_side_dominance: float = 0.88
+    min_sell_positive_rate_train: float = 0.16
     use_regime_adjustment: bool = False
     regime_delta: float = 0.02
 
@@ -76,17 +78,30 @@ def _build_dataset(use_synthetic_if_missing: bool = False):
         raise FileNotFoundError(f"Missing input file: {csv_path}")
 
     fs = build_features(prices, periods=list(HP.periods), periods_meta=list(HP.periods_meta), atr_window=HP.atr_window)
-    labels = create_dual_edge_labels(
-        close=fs.data["close"],
-        high=fs.data["high"],
-        low=fs.data["low"],
-        atr_window=HP.atr_window,
-        tp_atr_buy=1.4,
-        sl_atr_buy=1.2,
-        tp_atr_sell=1.4,
-        sl_atr_sell=1.2,
-        max_holding_bars=12,
-    )
+    sell_tp = 1.4
+    sell_sl = 1.2
+    labels = None
+    for _ in range(4):
+        labels = create_dual_edge_labels(
+            close=fs.data["close"],
+            high=fs.data["high"],
+            low=fs.data["low"],
+            atr_window=HP.atr_window,
+            tp_atr_buy=1.4,
+            sl_atr_buy=1.2,
+            tp_atr_sell=sell_tp,
+            sl_atr_sell=sell_sl,
+            max_holding_bars=12,
+        )
+        split_idx = int(len(labels) * HP.train_ratio)
+        sell_rate_train = float(labels["y_sell"].iloc[:split_idx].mean())
+        if sell_rate_train >= HP.min_sell_positive_rate_train:
+            break
+        # make SELL target less sparse without removing sell logic
+        sell_tp = max(0.8, sell_tp * 0.9)
+        sell_sl = min(1.6, sell_sl * 1.05)
+
+    assert labels is not None
     data = fs.data.join(labels[["y_buy", "y_sell", "direction_label"]], how="inner").dropna().copy()
     return data, fs.main_features, fs.feature_groups
 
@@ -131,6 +146,7 @@ def _threshold_search(
                     metrics["buy_trades"] < HP.min_buy_trades
                     or metrics["sell_trades"] < HP.min_sell_trades
                     or metrics["trades"] < HP.min_total_trades
+                    or metrics["no_trade_ratio"] > HP.max_no_trade_ratio
                     or metrics["side_dominance_ratio"] > HP.max_side_dominance
                 )
                 score = _score_threshold_row(metrics)
@@ -139,7 +155,10 @@ def _threshold_search(
                 rows.append({"buy_threshold": bt, "sell_threshold": st, "edge_margin": em, "score": score, "hard_fail": int(hard_fail), **metrics})
 
     res = pd.DataFrame(rows).sort_values(["hard_fail", "score", "pnl"], ascending=[True, False, False])
-    best = res.iloc[0].to_dict()
+    valid = res[res["hard_fail"] == 0]
+    if valid.empty:
+        raise RuntimeError("No valid threshold candidate met hard constraints (trade count/no-trade/dominance).")
+    best = valid.iloc[0].to_dict()
     return best, res
 
 
@@ -158,6 +177,8 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     assert X.index.equals(y_buy.index) and X.index.equals(y_sell.index), "feature/label index misalignment"
 
     label_diag = split_label_diagnostics(y_buy, y_sell, train_ratio=HP.train_ratio, val_ratio=HP.val_ratio)
+    print("Label positive rates by split:")
+    print(json.dumps(label_diag, indent=2))
     with open("reports/label_split_diagnostics.json", "w", encoding="utf-8") as f:
         json.dump(label_diag, f, indent=2)
 
@@ -238,8 +259,27 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     test_prob_sell = model_sell.predict_proba(teX_s)[:, 1]
 
     dual_cls = evaluate_dual_classification(te_buy, te_sell, test_prob_buy, test_prob_sell, buy_t, sell_t)
+    print(
+        f"Per-side AUC/PR-AUC | buy: {dual_cls['auc_buy']:.4f}/{dual_cls['pr_auc_buy']:.4f} | "
+        f"sell: {dual_cls['auc_sell']:.4f}/{dual_cls['pr_auc_sell']:.4f}"
+    )
+    if (
+        dual_cls["f1_buy"] <= 0.0
+        or dual_cls["f1_sell"] <= 0.0
+        or dual_cls["recall_buy"] <= 0.0
+        or dual_cls["recall_sell"] <= 0.0
+        or dual_cls["predicted_positive_rate_buy"] < 0.01
+        or dual_cls["predicted_positive_rate_sell"] < 0.01
+    ):
+        raise RuntimeError(
+            "Degenerate classification outcome detected (f1/recall/predicted-positive too low). "
+            "Refine thresholds or labels; current run rejected."
+        )
+
     actions = resolve_actions(test_prob_buy, test_prob_sell, buy_t, sell_t, edge_margin)
     act_diag = action_semantic_diagnostics(actions, te_buy, te_sell)
+    if act_diag["count_buy_actions"] < HP.min_buy_trades or act_diag["count_sell_actions"] < HP.min_sell_trades:
+        raise RuntimeError("Degenerate action distribution detected: BUY/SELL actions below minimum constraints.")
 
     test_ds = pd.DataFrame(
         {
