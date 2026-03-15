@@ -23,6 +23,7 @@ class FeatureSelectionResult:
 
 
 def build_features(df: pd.DataFrame, periods: list[int], periods_meta: list[int], atr_window: int = 14) -> FeatureSet:
+    """Build causal features without fragmented DataFrame writes."""
     out = df.copy()
     close = out["close"]
     high = out["high"]
@@ -31,22 +32,25 @@ def build_features(df: pd.DataFrame, periods: list[int], periods_meta: list[int]
 
     main_features: list[str] = []
     meta_features: list[str] = []
+    feature_series: dict[str, pd.Series] = {}
+
+    returns = close.pct_change()
+    prev_close = close.shift(1)
+    candle_body_raw = (close - out["open"]) / (prev_close.abs() + 1e-12)
+    intrabar_range_raw = (high - low) / (prev_close.abs() + 1e-12)
 
     for n in periods:
         ma = close.rolling(n).mean()
         rolling_std = close.rolling(n).std()
         long_std = close.rolling(n * 3).std()
-        rolling_ret_std = close.pct_change().rolling(n).std()
+        rolling_ret_std = returns.rolling(n).std()
         roll_low = close.rolling(n).min()
         roll_high = close.rolling(n).max()
         ema = close.ewm(span=n, adjust=False).mean()
-        prev_close = close.shift(1)
-        candle_body = (close - out["open"]) / (prev_close.abs() + 1e-12)
-        intrabar_range = (high - low) / (prev_close.abs() + 1e-12)
         breakout_up = (close - roll_high.shift(1)) / (prev_close.abs() + 1e-12)
         breakout_down = (roll_low.shift(1) - close) / (prev_close.abs() + 1e-12)
-        downside_vol = close.pct_change().clip(upper=0).rolling(n).std()
-        upside_vol = close.pct_change().clip(lower=0).rolling(n).std()
+        downside_vol = returns.clip(upper=0).rolling(n).std()
+        upside_vol = returns.clip(lower=0).rolling(n).std()
 
         feats = {
             f"ma_dev_{n}": (close / ma) - 1,
@@ -56,29 +60,33 @@ def build_features(df: pd.DataFrame, periods: list[int], periods_meta: list[int]
             f"rsi_like_{n}": (close.diff() > 0).rolling(n).mean(),
             f"vol_chg_{n}": (volume / (volume.rolling(n).mean() + 1e-12)) - 1,
             f"ema_dev_{n}": (close / (ema + 1e-12)) - 1,
-            f"ret_zscore_{n}": close.pct_change() / (rolling_ret_std + 1e-12),
-            f"candle_body_{n}": candle_body.rolling(n).mean(),
-            f"range_norm_{n}": intrabar_range.rolling(n).mean(),
+            f"ret_zscore_{n}": returns / (rolling_ret_std + 1e-12),
+            f"candle_body_{n}": candle_body_raw.rolling(n).mean(),
+            f"range_norm_{n}": intrabar_range_raw.rolling(n).mean(),
             f"breakout_up_{n}": breakout_up.rolling(n).mean(),
             f"breakout_down_{n}": breakout_down.rolling(n).mean(),
             f"vol_skew_{n}": (upside_vol - downside_vol) / (rolling_ret_std + 1e-12),
         }
-        for k, v in feats.items():
-            out[k] = v
-            main_features.append(k)
+
+        feature_series.update(feats)
+        main_features.extend(list(feats.keys()))
 
     atr = (high - low).rolling(atr_window).mean() / close
     for n in periods_meta:
         s = close.rolling(n)
-        out[f"skew_meta_{n}"] = s.skew()
-        out[f"kurt_meta_{n}"] = s.kurt()
-        out[f"trend_strength_meta_{n}"] = close.ewm(span=n, adjust=False).mean().diff().abs()
-        meta_features.extend([f"skew_meta_{n}", f"kurt_meta_{n}", f"trend_strength_meta_{n}"])
+        meta_dict = {
+            f"skew_meta_{n}": s.skew(),
+            f"kurt_meta_{n}": s.kurt(),
+            f"trend_strength_meta_{n}": close.ewm(span=n, adjust=False).mean().diff().abs(),
+        }
+        feature_series.update(meta_dict)
+        meta_features.extend(list(meta_dict.keys()))
 
-    out["atr_meta"] = atr
+    feature_series["atr_meta"] = atr
     meta_features.append("atr_meta")
 
-    out = out.dropna().copy()
+    feature_frame = pd.concat(feature_series, axis=1)
+    out = pd.concat([out, feature_frame], axis=1).dropna().copy()
     return FeatureSet(data=out, main_features=main_features, meta_features=meta_features)
 
 

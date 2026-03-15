@@ -20,6 +20,27 @@ def _profit_factor(pnl: pd.Series) -> float:
     return float(gross_profit / gross_loss)
 
 
+def _side_stats(trades: pd.DataFrame, side: str) -> dict[str, float]:
+    g = trades[trades["side"] == side]
+    if g.empty:
+        return {
+            f"{side}_trades": 0,
+            f"{side}_win_rate": 0.0,
+            f"{side}_pnl": 0.0,
+            f"avg_win_{side}": 0.0,
+            f"avg_loss_{side}": 0.0,
+        }
+    wins = g[g["pnl"] > 0]["pnl"]
+    losses = g[g["pnl"] < 0]["pnl"]
+    return {
+        f"{side}_trades": int(len(g)),
+        f"{side}_win_rate": float((g["pnl"] > 0).mean()),
+        f"{side}_pnl": float(g["pnl"].sum()),
+        f"avg_win_{side}": float(wins.mean()) if len(wins) else 0.0,
+        f"avg_loss_{side}": float(losses.mean()) if len(losses) else 0.0,
+    }
+
+
 def backtest_signals(
     dataset: pd.DataFrame,
     stop: float,
@@ -39,6 +60,11 @@ def backtest_signals(
     trades = []
     close_vals = df["close"].to_numpy()
     idx = df.index
+
+    usable = signal.notna() & confirm.eq(1.0)
+    long_candidates = int((usable & signal.eq(0.0)).sum())
+    short_candidates = int((usable & signal.eq(1.0)).sum())
+    no_trade_bars = int((~usable | ~signal.isin([0.0, 1.0])).sum())
 
     for i in range(signal_shift, len(df) - 2):
         if confirm.iloc[i] != 1.0:
@@ -108,6 +134,13 @@ def backtest_signals(
             "sortino_like": 0.0,
             "long_trades": 0,
             "short_trades": 0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "payoff_ratio": 0.0,
+            "long_candidates": long_candidates,
+            "short_candidates": short_candidates,
+            "no_trade_bars": no_trade_bars,
+            "no_trade_ratio": float(no_trade_bars / max(1, len(df))),
         }
         return trades_df, metrics
 
@@ -117,6 +150,10 @@ def backtest_signals(
     downside = r[r < 0]
     downside_std = float(downside.std(ddof=0)) if len(downside) else 0.0
     total_std = float(r.std(ddof=0)) if len(r) else 0.0
+    wins = r[r > 0]
+    losses = r[r < 0]
+    avg_win = float(wins.mean()) if len(wins) else 0.0
+    avg_loss = float(losses.mean()) if len(losses) else 0.0
 
     metrics = {
         "trades": int(len(trades_df)),
@@ -130,7 +167,16 @@ def backtest_signals(
         "sortino_like": float(r.mean() / downside_std) if downside_std > 1e-12 else 0.0,
         "long_trades": int((trades_df["side"] == "buy").sum()),
         "short_trades": int((trades_df["side"] == "sell").sum()),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": float(avg_win / abs(avg_loss)) if avg_loss < 0 else 0.0,
+        "long_candidates": long_candidates,
+        "short_candidates": short_candidates,
+        "no_trade_bars": no_trade_bars,
+        "no_trade_ratio": float(no_trade_bars / max(1, len(df))),
     }
+    metrics.update(_side_stats(trades_df, "buy"))
+    metrics.update(_side_stats(trades_df, "sell"))
     return trades_df, metrics
 
 
@@ -180,7 +226,6 @@ def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "
 
     trades_df.to_csv(f"{out_dir}/{symbol}_trade_log.csv", index=False)
 
-    # pandas mới đã deprecate/loại bỏ alias "M", dùng "ME" (month-end)
     monthly_base = trades_df.copy()
     monthly_base["exit_time"] = pd.to_datetime(monthly_base["exit_time"], errors="coerce")
     monthly_base = monthly_base.dropna(subset=["exit_time"])

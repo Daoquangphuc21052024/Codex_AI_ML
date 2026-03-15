@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
 from sklearn.cluster import KMeans
+from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import RobustScaler
 
 from data_lib import build_split_visualization, generate_synthetic_ohlc, read_price_csv
@@ -23,6 +24,8 @@ from tester_lib import backtest_signals, save_backtest_reports
 
 np.random.seed(SEED)
 random.seed(SEED)
+
+LABEL_MEANING = {0: "BUY", 1: "SELL"}
 
 
 @dataclass
@@ -43,6 +46,9 @@ class HyperParams:
     min_f1: float = 0.45
     main_iterations: int = 300
     meta_iterations: int = 250
+    min_total_trades: int = 80
+    min_side_trades: int = 10
+    max_side_dominance: float = 0.92
 
 
 HP = HyperParams(export_path=os.environ.get("MT5_INCLUDE_PATH", os.path.join(os.getcwd(), "exports")))
@@ -98,51 +104,194 @@ def _build_dataset(use_synthetic_if_missing: bool = False):
     return data, fs.main_features, fs.meta_features
 
 
-def _signal_from_probability(prob_sell: np.ndarray, sell_threshold: float) -> np.ndarray:
-    buy_threshold = 1.0 - sell_threshold
+def _assert_label_mapping(y: pd.Series) -> None:
+    uniq = set(y.unique().tolist())
+    assert uniq.issubset({0, 1}), f"labels must be binary 0/1, got {uniq}"
+
+
+def _split_label_diagnostics(y: pd.Series, train_ratio: float, val_ratio: float) -> dict:
+    _, y_tr, _, y_val, _, y_te = _time_split_3way(y, y, train_ratio, val_ratio)
+
+    def stats(s: pd.Series) -> dict:
+        counts = s.value_counts().to_dict()
+        total = max(1, len(s))
+        return {
+            "n": int(len(s)),
+            "buy(0)": int(counts.get(0, 0)),
+            "sell(1)": int(counts.get(1, 0)),
+            "buy_ratio": float(counts.get(0, 0) / total),
+            "sell_ratio": float(counts.get(1, 0) / total),
+        }
+
+    return {
+        "semantic_mapping": {"0": "BUY", "1": "SELL"},
+        "train": stats(y_tr),
+        "val": stats(y_val),
+        "test": stats(y_te),
+    }
+
+
+def _signal_from_probability(prob_sell: np.ndarray, buy_threshold: float, sell_threshold: float) -> np.ndarray:
+    assert 0.0 <= buy_threshold < sell_threshold <= 1.0, "require buy_threshold < sell_threshold"
+    is_short_signal = prob_sell >= sell_threshold
+    is_long_signal = prob_sell <= buy_threshold
+    assert not np.any(is_short_signal & is_long_signal), "a bar cannot be long and short simultaneously"
+
     signal = np.full(len(prob_sell), np.nan, dtype=float)
-    signal[prob_sell >= sell_threshold] = 1.0
-    signal[prob_sell <= buy_threshold] = 0.0
+    signal[is_long_signal] = 0.0
+    signal[is_short_signal] = 1.0
+
+    no_trade = ~(is_short_signal | is_long_signal)
+    assert np.all(np.isnan(signal[no_trade])), "bars between thresholds must be no-trade"
     return signal
 
 
-def _select_threshold_by_validation_trading(
+def _binary_signal(prob_sell: np.ndarray) -> np.ndarray:
+    return (prob_sell >= 0.5).astype(float)
+
+
+def _probability_diagnostics(y_true: pd.Series, prob_sell: np.ndarray, buy_t: float, sell_t: float) -> dict:
+    y_arr = y_true.to_numpy()
+    prob_buy = 1.0 - prob_sell
+    no_trade_mask = (prob_sell > buy_t) & (prob_sell < sell_t)
+    return {
+        "prob_sell_mean": float(prob_sell.mean()),
+        "prob_sell_std": float(prob_sell.std()),
+        "prob_buy_mean": float(prob_buy.mean()),
+        "prob_buy_std": float(prob_buy.std()),
+        "count_prob_ge_sell_threshold": int((prob_sell >= sell_t).sum()),
+        "count_prob_le_buy_threshold": int((prob_sell <= buy_t).sum()),
+        "count_prob_between_thresholds": int(no_trade_mask.sum()),
+        "ambiguity_rate_between_thresholds": float(no_trade_mask.mean()),
+        "predicted_positive_rate_at_05": float((prob_sell >= 0.5).mean()),
+        "true_buy_prob_sell_mean": float(prob_sell[y_arr == 0].mean()) if np.any(y_arr == 0) else 0.0,
+        "true_sell_prob_sell_mean": float(prob_sell[y_arr == 1].mean()) if np.any(y_arr == 1) else 0.0,
+    }
+
+
+def _direction_diagnostics(name: str, signals: np.ndarray) -> dict:
+    long_n = int(np.sum(signals == 0.0))
+    short_n = int(np.sum(signals == 1.0))
+    no_trade_n = int(np.sum(np.isnan(signals)))
+    total = max(1, len(signals))
+    dominance = max(long_n, short_n) / max(1, long_n + short_n)
+    warn = ""
+    if long_n + short_n > 0 and dominance > HP.max_side_dominance:
+        warn = f"directional dominance warning: {dominance:.3f}"
+    return {
+        "name": name,
+        "long_signals": long_n,
+        "short_signals": short_n,
+        "no_trade_signals": no_trade_n,
+        "long_ratio": float(long_n / total),
+        "short_ratio": float(short_n / total),
+        "no_trade_ratio": float(no_trade_n / total),
+        "dominance": float(dominance),
+        "warning": warn,
+    }
+
+
+def _semantic_confusion(y_true: pd.Series, y_pred: np.ndarray) -> dict:
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    return {
+        "labels": ["BUY(0)", "SELL(1)"],
+        "matrix": cm.tolist(),
+        "BUY_as_BUY": int(cm[0, 0]),
+        "BUY_as_SELL": int(cm[0, 1]),
+        "SELL_as_BUY": int(cm[1, 0]),
+        "SELL_as_SELL": int(cm[1, 1]),
+    }
+
+
+def _select_thresholds_by_validation_trading(
     val_index: pd.Index,
     val_close: pd.Series,
     val_prob_main: np.ndarray,
     val_prob_meta: np.ndarray,
-    threshold_candidates: list[float],
-) -> tuple[float, pd.DataFrame]:
+    use_meta: bool,
+) -> tuple[tuple[float, float], pd.DataFrame]:
     rows = []
-    for t in threshold_candidates:
-        pred = pd.DataFrame(index=val_index)
-        pred["close"] = val_close.loc[val_index]
-        pred["labels"] = _signal_from_probability(val_prob_main, t)
-        pred["meta_labels"] = (val_prob_meta >= 0.5).astype(float)
+    buy_candidates = [round(x, 3) for x in np.arange(0.34, 0.50, 0.01)]
+    sell_candidates = [round(x, 3) for x in np.arange(0.51, 0.68, 0.01)]
 
-        trades_df, m = backtest_signals(
-            pred,
-            stop=HP.stop_loss,
-            take=HP.take_profit,
-            markup=HP.markup,
-            max_hold=120,
-            signal_shift=1,
-        )
+    for buy_t in buy_candidates:
+        for sell_t in sell_candidates:
+            if buy_t >= sell_t:
+                continue
 
-        score = m["pnl"]
-        if m["trades"] < 50:
-            score -= 1000.0
-        if m["profit_factor"] < 1.0:
-            score -= 500.0
+            pred = pd.DataFrame(index=val_index)
+            pred["close"] = val_close.loc[val_index]
+            pred["labels"] = _signal_from_probability(val_prob_main, buy_t, sell_t)
+            pred["meta_labels"] = (val_prob_meta >= 0.5).astype(float) if use_meta else 1.0
 
-        rows.append({"threshold": t, "score": score, **m})
+            _, m = backtest_signals(pred, stop=HP.stop_loss, take=HP.take_profit, markup=HP.markup, max_hold=120, signal_shift=1)
+            side_total = max(1, m["long_trades"] + m["short_trades"])
+            side_dominance = max(m["long_trades"], m["short_trades"]) / side_total
 
-    res = pd.DataFrame(rows).sort_values(["score", "profit_factor", "pnl"], ascending=False)
-    best_t = float(res.iloc[0]["threshold"])
-    return best_t, res
+            hard_fail = (
+                m["trades"] < HP.min_total_trades
+                or m["long_trades"] < HP.min_side_trades
+                or m["short_trades"] < HP.min_side_trades
+                or side_dominance > HP.max_side_dominance
+            )
+
+            score = m["pnl"]
+            if m["profit_factor"] < 1.0:
+                score -= 300.0
+            if hard_fail:
+                score -= 1500.0
+
+            rows.append(
+                {
+                    "buy_threshold": buy_t,
+                    "sell_threshold": sell_t,
+                    "score": score,
+                    "hard_fail": int(hard_fail),
+                    "side_dominance": side_dominance,
+                    **m,
+                }
+            )
+
+    res = pd.DataFrame(rows).sort_values(["hard_fail", "score", "profit_factor", "pnl"], ascending=[True, False, False, False])
+    best = res.iloc[0]
+    return (float(best["buy_threshold"]), float(best["sell_threshold"])), res
 
 
-def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = False):
+def _run_meta_diagnostics(
+    val_index: pd.Index,
+    val_close: pd.Series,
+    val_prob_main: np.ndarray,
+    val_prob_meta: np.ndarray,
+    buy_t: float,
+    sell_t: float,
+) -> tuple[str, pd.DataFrame]:
+    variants = []
+
+    pred_main_only = pd.DataFrame(index=val_index)
+    pred_main_only["close"] = val_close.loc[val_index]
+    pred_main_only["labels"] = _signal_from_probability(val_prob_main, buy_t, sell_t)
+    pred_main_only["meta_labels"] = 1.0
+    _, m1 = backtest_signals(pred_main_only, stop=HP.stop_loss, take=HP.take_profit, markup=HP.markup, max_hold=120, signal_shift=1)
+    variants.append({"variant": "main_only", **m1})
+
+    pred_main_meta = pred_main_only.copy()
+    pred_main_meta["meta_labels"] = (val_prob_meta >= 0.5).astype(float)
+    _, m2 = backtest_signals(pred_main_meta, stop=HP.stop_loss, take=HP.take_profit, markup=HP.markup, max_hold=120, signal_shift=1)
+    variants.append({"variant": "main_plus_meta", **m2})
+
+    pred_simple = pd.DataFrame(index=val_index)
+    pred_simple["close"] = val_close.loc[val_index]
+    pred_simple["labels"] = _binary_signal(val_prob_main)
+    pred_simple["meta_labels"] = 1.0
+    _, m3 = backtest_signals(pred_simple, stop=HP.stop_loss, take=HP.take_profit, markup=HP.markup, max_hold=120, signal_shift=1)
+    variants.append({"variant": "main_binary_t05", **m3})
+
+    cmp = pd.DataFrame(variants).sort_values(["pnl", "profit_factor"], ascending=False)
+    best_variant = str(cmp.iloc[0]["variant"])
+    return best_variant, cmp
+
+
+def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = False, disable_meta: bool = False):
     Path("reports").mkdir(exist_ok=True)
     Path(HP.export_path).mkdir(parents=True, exist_ok=True)
 
@@ -155,9 +304,12 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     y_main = data["labels"].astype(int)
     y_meta = data["meta_target"].astype(int)
 
-    train_X_raw, train_y_raw, val_X_raw, val_y, test_X_raw, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
-    train_Xm_raw, train_ym, val_Xm_raw, val_ym, test_Xm_raw, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
+    _assert_label_mapping(y_main)
+    label_diag = _split_label_diagnostics(y_main, HP.train_ratio, HP.val_ratio)
+    with open("reports/label_split_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump(label_diag, f, indent=2)
 
+    train_X_raw, train_y_raw, _, _, _, _ = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
     fs_result = select_main_features_train_only(
         X_train=train_X_raw,
         y_train=train_y_raw,
@@ -237,38 +389,69 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     )
     meta_model.fit(train_Xm_s, train_ym, eval_set=(val_Xm_s, val_ym))
 
-    val_prob = model.predict_proba(val_X_s)[:, 1]
+    val_prob_sell = model.predict_proba(val_X_s)[:, 1]
     meta_val_prob = meta_model.predict_proba(val_Xm_s)[:, 1]
 
-    # (1) ML-based threshold (macro-f1 + anti-collapse)
-    best_t_ml, threshold_pack = optimize_threshold(val_y, val_prob)
+    best_t_ml, threshold_pack = optimize_threshold(val_y, val_prob_sell)
     pd.DataFrame(threshold_pack["all"]).to_csv("reports/threshold_search_ml.csv", index=False)
 
-    # (2) Trading-based threshold on validation only (no test leakage)
-    threshold_candidates = [round(x, 3) for x in np.arange(0.50, 0.70, 0.01)]
-    best_t_trade, threshold_trade_df = _select_threshold_by_validation_trading(
+    use_meta_for_threshold = not disable_meta
+    (buy_t, sell_t), threshold_trade_df = _select_thresholds_by_validation_trading(
         val_index=val_X.index,
         val_close=data["close"],
-        val_prob_main=val_prob,
+        val_prob_main=val_prob_sell,
         val_prob_meta=meta_val_prob,
-        threshold_candidates=threshold_candidates,
+        use_meta=use_meta_for_threshold,
     )
     threshold_trade_df.to_csv("reports/threshold_search_trading.csv", index=False)
+    threshold_trade_df.head(20).to_csv("reports/threshold_search_trading_top20.csv", index=False)
 
-    # Pick threshold by validation trading score; fallback to ML threshold if degenerate
-    best_t = best_t_trade if np.isfinite(best_t_trade) else best_t_ml
+    best_variant, meta_cmp = _run_meta_diagnostics(
+        val_index=val_X.index,
+        val_close=data["close"],
+        val_prob_main=val_prob_sell,
+        val_prob_meta=meta_val_prob,
+        buy_t=buy_t,
+        sell_t=sell_t,
+    )
+    meta_cmp.to_csv("reports/meta_variant_comparison_val.csv", index=False)
 
-    test_prob = model.predict_proba(test_X_s)[:, 1]
-    metrics_cls, _, _ = classification_metrics(test_y, test_prob, threshold=best_t)
+    meta_best_iter = int(meta_model.get_best_iteration())
+    meta_warning = ""
+    use_meta_gate = not disable_meta and best_variant == "main_plus_meta"
+    if meta_best_iter <= 1:
+        meta_warning = "meta_model best_iteration <= 1: meta gate disabled"
+        use_meta_gate = False
+
+    val_prob_diag = _probability_diagnostics(val_y, val_prob_sell, buy_t, sell_t)
+    val_signals = _signal_from_probability(val_prob_sell, buy_t, sell_t)
+    val_dir_diag = _direction_diagnostics("val", val_signals)
+
+    test_prob_sell = model.predict_proba(test_X_s)[:, 1]
+    test_prob_diag = _probability_diagnostics(test_y, test_prob_sell, buy_t, sell_t)
+    test_signals = _signal_from_probability(test_prob_sell, buy_t, sell_t)
+    test_dir_diag = _direction_diagnostics("test", test_signals)
+
+    with open("reports/probability_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump({"val": val_prob_diag, "test": test_prob_diag}, f, indent=2)
+    with open("reports/direction_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump({"val": val_dir_diag, "test": test_dir_diag}, f, indent=2)
+
+    metrics_cls, y_pred_cls, _ = classification_metrics(test_y, test_prob_sell, threshold=sell_t)
+    metrics_cls["buy_threshold"] = buy_t
+    metrics_cls["sell_threshold"] = sell_t
+    metrics_cls["probability_semantic"] = "prob_sell = P(label=SELL=1)"
+    metrics_cls["semantic_confusion"] = _semantic_confusion(test_y, y_pred_cls)
+
     with open("reports/classification_metrics_test.json", "w", encoding="utf-8") as f:
         json.dump(metrics_cls, f, indent=2)
-    save_classification_reports(test_y, test_prob, best_t, HP.symbol, out_dir="reports")
+    save_classification_reports(test_y, test_prob_sell, sell_t, HP.symbol, out_dir="reports")
 
-    meta_prob = meta_model.predict_proba(test_Xm_s)[:, 1]
+    meta_test = (meta_model.predict_proba(test_Xm_s)[:, 1] >= 0.5).astype(float) if use_meta_gate else np.ones(len(test_X), dtype=float)
     pred_df = pd.DataFrame(index=test_X.index)
     pred_df["close"] = data.loc[test_X.index, "close"]
-    pred_df["labels"] = _signal_from_probability(test_prob, best_t)
-    pred_df["meta_labels"] = (meta_prob >= 0.5).astype(float)
+    pred_df["labels"] = test_signals
+    pred_df["meta_labels"] = meta_test
 
     trades_df, trading_metrics = backtest_signals(
         pred_df,
@@ -284,16 +467,38 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
 
     save_feature_importance(model, main_features, HP.symbol, out_dir="reports", top_n=20)
 
+    diagnostics = {
+        "label_split": label_diag,
+        "probability": {"val": val_prob_diag, "test": test_prob_diag},
+        "direction": {"val": val_dir_diag, "test": test_dir_diag},
+        "threshold_choice": {
+            "buy_threshold": buy_t,
+            "sell_threshold": sell_t,
+            "selection_rule": "validation trading with side-balance constraints",
+            "top_candidates": threshold_trade_df.head(10).to_dict(orient="records"),
+        },
+        "meta": {
+            "disable_meta_flag": disable_meta,
+            "meta_best_iteration": meta_best_iter,
+            "meta_variant_best": best_variant,
+            "meta_gate_used": use_meta_gate,
+            "warning": meta_warning,
+        },
+    }
+    with open("reports/pipeline_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump(diagnostics, f, indent=2)
+
     report = {
         "timeframe": "H1",
         "train_ratio": HP.train_ratio,
         "val_ratio": HP.val_ratio,
         "test_ratio": 1 - HP.train_ratio - HP.val_ratio,
+        "class_semantic": {"0": "BUY", "1": "SELL"},
         "n_features_main": len(main_features),
         "n_features_meta": len(meta_features),
-        "best_threshold_sell": best_t,
-        "best_threshold_buy": 1.0 - best_t,
-        "threshold_source": "validation_trading",
+        "best_threshold_sell": sell_t,
+        "best_threshold_buy": buy_t,
+        "threshold_source": "validation_trading_constrained",
         "classification_metrics_test": metrics_cls,
         "trading_metrics_test": trading_metrics,
         "best_main_params": {
@@ -303,7 +508,12 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
             "iterations": int(best_params["iterations"]),
         },
         "main_model": {"best_iteration": int(model.get_best_iteration()), "best_score": model.get_best_score()},
-        "meta_model": {"best_iteration": int(meta_model.get_best_iteration()), "best_score": meta_model.get_best_score()},
+        "meta_model": {
+            "best_iteration": meta_best_iter,
+            "best_score": meta_model.get_best_score(),
+            "meta_gate_used": use_meta_gate,
+            "warning": meta_warning,
+        },
         "train_period": {"start": str(train_X.index.min()), "end": str(train_X.index.max())},
         "val_period": {"start": str(val_X.index.min()), "end": str(val_X.index.max())},
         "test_period": {"start": str(test_X.index.min()), "end": str(test_X.index.max())},
@@ -328,25 +538,30 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         periods_meta=list(HP.periods_meta),
         feature_names=main_features,
         feature_names_meta=meta_features,
-        decision_threshold=best_t,
+        decision_threshold=sell_t,
         sample_main=test_X_s,
         sample_meta=test_Xm_s,
     )
 
     with open("reports/run_summary.json", "w", encoding="utf-8") as f:
-        json.dump({"exported": exported, "report": report}, f, indent=2)
+        json.dump({"exported": exported, "report": report, "diagnostics": diagnostics}, f, indent=2)
 
     print("Training complete")
-    print(json.dumps({"classification": metrics_cls, "trading": trading_metrics}, indent=2))
+    print(json.dumps({"classification": metrics_cls, "trading": trading_metrics, "diagnostics": diagnostics["meta"]}, indent=2))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["train", "search"], default="train")
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data when files/XAUUSD_H1.csv is missing")
+    parser.add_argument("--disable-meta", action="store_true", help="Disable meta-model confirmation gate")
     args = parser.parse_args()
 
-    train_pipeline(use_synthetic_if_missing=args.synthetic, run_search=args.mode == "search")
+    train_pipeline(
+        use_synthetic_if_missing=args.synthetic,
+        run_search=args.mode == "search",
+        disable_meta=args.disable_meta,
+    )
 
 
 if __name__ == "__main__":
