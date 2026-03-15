@@ -94,8 +94,9 @@ def run(config_path: str) -> None:
                 "mcc": fr.mcc,
                 "overfit_gap": fr.overfit_gap,
                 "no_trade_threshold": fr.no_trade_threshold,
-                "min_side_prob": fr.min_side_prob,
-                "side_gap": fr.side_gap,
+                "trade_threshold": fr.trade_threshold,
+                "side_margin": fr.side_margin,
+                "expected_edge_min": fr.expected_edge_min,
                 "n_selected_features": len(fr.selected_features),
                 "pred_dist": json.dumps(fr.pred_distribution),
                 "actual_dist": json.dumps(fr.actual_distribution),
@@ -105,6 +106,22 @@ def run(config_path: str) -> None:
         fold_confusions[f"fold_{fr.fold}"] = fr.confusion.tolist()
 
     pd.DataFrame(fold_metrics).to_csv(out_dir / "fold_metrics.csv", index=False)
+
+    confidence_rows = []
+    for fr in fold_results:
+        for row in fr.confidence_bucket_metrics:
+            confidence_rows.append({"fold": fr.fold, **row})
+    if confidence_rows:
+        pd.DataFrame(confidence_rows).to_csv(out_dir / "confidence_bucket_metrics.csv", index=False)
+
+    if not trade_log.empty:
+        trade_conf = pd.cut(trade_log["confidence"], bins=[0.0, 0.40, 0.55, 0.70, 0.85, 1.0], include_lowest=True)
+        pnl_by_bucket = (
+            trade_log.assign(conf_bucket=trade_conf.astype(str))
+            .groupby("conf_bucket", as_index=False)
+            .agg(trades=("pnl_r", "count"), mean_pnl_r=("pnl_r", "mean"), total_pnl_r=("pnl_r", "sum"))
+        )
+        pnl_by_bucket.to_csv(out_dir / "pnl_by_confidence_bucket.csv", index=False)
 
     with (out_dir / "label_diagnostics.json").open("w", encoding="utf-8") as f:
         json.dump(diagnostics.__dict__, f, ensure_ascii=False, indent=2)
@@ -144,6 +161,21 @@ def run(config_path: str) -> None:
 
     with (out_dir / "backtest_summary.json").open("w", encoding="utf-8") as f:
         json.dump(backtest_summary, f, ensure_ascii=False, indent=2)
+
+    with (out_dir / "trade_definition.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "entry_mode": cfg.labeling.entry_mode,
+                "horizon_bars": cfg.labeling.horizon_bars,
+                "tie_breaker": cfg.labeling.tie_breaker,
+                "tp_points": diagnostics.tp_points,
+                "sl_points": diagnostics.sl_points,
+                "label_no_trade_semantics": "low_move_or_conflict_or_non_dominant",
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     logger.info("Completed pipeline with %d final selected features: %s", len(final_features), final_features)
 

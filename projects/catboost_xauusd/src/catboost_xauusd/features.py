@@ -129,14 +129,11 @@ def engineer_features(df: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
     out["compression_pre_expand"] = out["std_ret_6"] / out["std_ret_24"].replace(0, np.nan)
     out["swing_pressure_12"] = (np.sign(out["close"] - out["open"]) * out["hl_range"]).rolling(12, min_periods=12).sum()
 
-    # 10) LABEL-ALIGNED FEATURES
-    out["tp_potential_buy"] = (out["high"].rolling(12, min_periods=12).max() - out["close"]) / out["atr_12"].replace(0, np.nan)
-    out["tp_potential_sell"] = (out["close"] - out["low"].rolling(12, min_periods=12).min()) / out["atr_12"].replace(0, np.nan)
-    out["adverse_proxy_buy"] = (out["close"] - out["low"].rolling(12, min_periods=12).min()) / out["atr_12"].replace(0, np.nan)
-    out["adverse_proxy_sell"] = (out["high"].rolling(12, min_periods=12).max() - out["close"]) / out["atr_12"].replace(0, np.nan)
-    out["rr_context_buy"] = out["tp_potential_buy"] / (out["adverse_proxy_buy"].replace(0, np.nan))
-    out["rr_context_sell"] = out["tp_potential_sell"] / (out["adverse_proxy_sell"].replace(0, np.nan))
-    out["setup_quality"] = out[["move_eff_12", "trend_strength_24", "body_range_ratio"]].mean(axis=1)
+    # 10) SETUP QUALITY (de-proxied from direct TP/SL target formulas)
+    out["trend_vol_balance"] = out["trend_strength_24"] / (out["std_ret_24"] + eps)
+    out["impulse_quality"] = out["momentum_impulse_12"] * out["move_eff_12"]
+    out["structure_quality"] = out["body_range_ratio"] * (1.0 - out["wick_asym"].abs().clip(upper=1.0))
+    out["setup_quality"] = out[["move_eff_12", "trend_vol_balance", "structure_quality"]].mean(axis=1)
 
     feature_families: dict[str, str] = {}
     family_map = {
@@ -167,8 +164,8 @@ def engineer_features(df: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
         "context": [
             "roll_rank_close_48", "breakout_prox_24", "meanrev_dist_24", "compression_pre_expand", "swing_pressure_12",
         ],
-        "label_aligned": [
-            "tp_potential_buy", "tp_potential_sell", "adverse_proxy_buy", "adverse_proxy_sell", "rr_context_buy", "rr_context_sell", "setup_quality",
+        "setup_quality": [
+            "trend_vol_balance", "impulse_quality", "structure_quality", "setup_quality",
         ],
     }
 

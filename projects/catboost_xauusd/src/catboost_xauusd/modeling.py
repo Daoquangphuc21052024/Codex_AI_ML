@@ -36,11 +36,13 @@ class FoldResult:
     test_probs: np.ndarray
     test_pred: np.ndarray
     no_trade_threshold: float
-    min_side_prob: float
-    side_gap: float
+    trade_threshold: float
+    side_margin: float
+    expected_edge_min: float
     selected_features: list[str]
     pred_distribution: dict[int, float]
     actual_distribution: dict[int, float]
+    confidence_bucket_metrics: list[dict[str, float | str | int]]
 
 
 def _compute_class_weights(y_train: pd.Series) -> list[float]:
@@ -77,41 +79,92 @@ def _select_fold_features(x_train: pd.DataFrame, y_train: pd.Series, candidates:
     return selected[: feat_cfg.max_features]
 
 
-def _decode_predictions(probs: np.ndarray, no_trade_threshold: float, min_side_prob: float, side_gap: float) -> np.ndarray:
+def _decode_predictions(
+    probs: np.ndarray,
+    no_trade_threshold: float,
+    trade_threshold: float,
+    side_margin: float,
+    expected_edge_min: float,
+) -> np.ndarray:
     p0, p1, p2 = probs[:, 0], probs[:, 1], probs[:, 2]
     side = np.where(p1 >= p2, 1, 2)
     side_prob = np.maximum(p1, p2)
-    gap = np.abs(p1 - p2)
-    no_trade = (p0 >= no_trade_threshold) | (side_prob < min_side_prob) | (gap < side_gap)
-    return np.where(no_trade, 0, side).astype(np.int32)
+    alt_prob = np.minimum(p1, p2)
+    side_advantage = side_prob - alt_prob
+
+    # Edge proxy encourages asymmetry towards directional class vs no-trade class.
+    expected_edge = side_prob - p0
+    should_trade = (
+        (p0 < no_trade_threshold)
+        & (side_prob >= trade_threshold)
+        & (side_advantage >= side_margin)
+        & (expected_edge >= expected_edge_min)
+    )
+    return np.where(should_trade, side, 0).astype(np.int32)
+
+
+def _confidence_bucket_report(y_true: pd.Series, y_pred: np.ndarray, probs: np.ndarray) -> list[dict[str, float | str | int]]:
+    confidence = np.maximum(probs[:, 1], probs[:, 2])
+    bins = pd.cut(confidence, bins=[0.0, 0.40, 0.55, 0.70, 0.85, 1.0], include_lowest=True)
+    rows: list[dict[str, float | str | int]] = []
+
+    bucket_df = pd.DataFrame({"bucket": bins.astype(str), "y_true": y_true.to_numpy(), "y_pred": y_pred, "trade": y_pred != 0})
+    for bucket, g in bucket_df.groupby("bucket", sort=False):
+        if g.empty:
+            continue
+        rows.append(
+            {
+                "bucket": str(bucket),
+                "samples": int(len(g)),
+                "trade_count": int(g["trade"].sum()),
+                "trade_ratio": float(g["trade"].mean()),
+                "accuracy": float(accuracy_score(g["y_true"], g["y_pred"])),
+                "macro_f1": float(f1_score(g["y_true"], g["y_pred"], average="macro", zero_division=0)),
+            }
+        )
+    return rows
 
 
 def _optimize_decision_thresholds(y_true: pd.Series, probs: np.ndarray, base_threshold: float) -> dict[str, float]:
-    best = {"no_trade_threshold": float(np.clip(base_threshold, 0.30, 0.80)), "min_side_prob": 0.38, "side_gap": 0.03}
+    best = {
+        "no_trade_threshold": float(np.clip(base_threshold, 0.30, 0.85)),
+        "trade_threshold": 0.45,
+        "side_margin": 0.04,
+        "expected_edge_min": 0.02,
+    }
     best_score = -1e9
 
     no_trade_grid = sorted(
         {
-            float(np.clip(base_threshold - 0.12, 0.30, 0.80)),
-            float(np.clip(base_threshold - 0.06, 0.30, 0.80)),
-            float(np.clip(base_threshold, 0.30, 0.80)),
-            float(np.clip(base_threshold + 0.06, 0.30, 0.80)),
-            float(np.clip(base_threshold + 0.12, 0.30, 0.80)),
+            float(np.clip(base_threshold - 0.10, 0.30, 0.85)),
+            float(np.clip(base_threshold - 0.05, 0.30, 0.85)),
+            float(np.clip(base_threshold, 0.30, 0.85)),
+            float(np.clip(base_threshold + 0.05, 0.30, 0.85)),
+            float(np.clip(base_threshold + 0.10, 0.30, 0.85)),
         }
     )
 
     for nt in no_trade_grid:
-        for min_side in [0.30, 0.36, 0.42, 0.48]:
-            for gap in [0.00, 0.02, 0.04, 0.06]:
-                pred = _decode_predictions(probs, nt, min_side, gap)
-                macro = f1_score(y_true, pred, average="macro", zero_division=0)
-                bal = balanced_accuracy_score(y_true, pred)
-                pred_share = pd.Series(pred).value_counts(normalize=True)
-                collapse_penalty = sum(0.05 for cls in [0, 1, 2] if pred_share.get(cls, 0.0) < 0.05)
-                score = 0.60 * macro + 0.30 * bal + 0.10 * matthews_corrcoef(y_true, pred) - collapse_penalty
-                if score > best_score:
-                    best_score = score
-                    best = {"no_trade_threshold": nt, "min_side_prob": min_side, "side_gap": gap}
+        for trade_th in [0.38, 0.44, 0.50, 0.56]:
+            for margin in [0.00, 0.03, 0.06, 0.09]:
+                for edge in [-0.02, 0.00, 0.03, 0.06]:
+                    pred = _decode_predictions(probs, nt, trade_th, margin, edge)
+                    macro = f1_score(y_true, pred, average="macro", zero_division=0)
+                    bal = balanced_accuracy_score(y_true, pred)
+                    mcc = matthews_corrcoef(y_true, pred)
+                    pred_share = pd.Series(pred).value_counts(normalize=True)
+                    collapse_penalty = sum(0.06 for cls in [1, 2] if pred_share.get(cls, 0.0) < 0.06)
+                    trade_ratio = float((pred != 0).mean())
+                    trade_ratio_penalty = 0.05 if trade_ratio < 0.10 else (0.03 if trade_ratio > 0.85 else 0.0)
+                    score = 0.50 * macro + 0.30 * bal + 0.20 * mcc - collapse_penalty - trade_ratio_penalty
+                    if score > best_score:
+                        best_score = score
+                        best = {
+                            "no_trade_threshold": nt,
+                            "trade_threshold": trade_th,
+                            "side_margin": margin,
+                            "expected_edge_min": edge,
+                        }
     return best
 
 
@@ -147,7 +200,11 @@ def tune_hyperparameters(
         val_probs = model.predict_proba(x_val)
         decision_cfg = _optimize_decision_thresholds(y_val, val_probs, cfg.threshold_no_trade)
         pred = _decode_predictions(val_probs, **decision_cfg)
-        score = 0.60 * f1_score(y_val, pred, average="macro", zero_division=0) + 0.30 * balanced_accuracy_score(y_val, pred) + 0.10 * matthews_corrcoef(y_val, pred)
+        score = (
+            0.50 * f1_score(y_val, pred, average="macro", zero_division=0)
+            + 0.30 * balanced_accuracy_score(y_val, pred)
+            + 0.20 * matthews_corrcoef(y_val, pred)
+        )
         scored.append((score, params, decision_cfg))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -191,6 +248,7 @@ def train_walk_forward(
 
         actual_distribution = {int(k): float(v) for k, v in y_test.value_counts(normalize=True).to_dict().items()}
         pred_distribution = {int(k): float(v) for k, v in pd.Series(test_pred).value_counts(normalize=True).to_dict().items()}
+        conf_bucket_metrics = _confidence_bucket_report(y_test, test_pred, test_probs)
 
         result = FoldResult(
             fold=fold.fold,
@@ -207,23 +265,28 @@ def train_walk_forward(
             test_probs=test_probs,
             test_pred=test_pred,
             no_trade_threshold=decision_cfg["no_trade_threshold"],
-            min_side_prob=decision_cfg["min_side_prob"],
-            side_gap=decision_cfg["side_gap"],
+            trade_threshold=decision_cfg["trade_threshold"],
+            side_margin=decision_cfg["side_margin"],
+            expected_edge_min=decision_cfg["expected_edge_min"],
             selected_features=selected,
             pred_distribution=pred_distribution,
             actual_distribution=actual_distribution,
+            confidence_bucket_metrics=conf_bucket_metrics,
         )
         fold_results.append(result)
 
         logger.info(
-            "Fold %d | test_acc=%.4f macro_f1=%.4f bal_acc=%.4f mcc=%.4f | pred_dist=%s actual_dist=%s",
+            "Fold %d | test_acc=%.4f macro_f1=%.4f bal_acc=%.4f mcc=%.4f | dec(nt=%.2f,tr=%.2f,margin=%.2f,edge=%.2f) | pred_dist=%s",
             result.fold,
             result.test_acc,
             result.macro_f1,
             result.balanced_acc,
             result.mcc,
+            result.no_trade_threshold,
+            result.trade_threshold,
+            result.side_margin,
+            result.expected_edge_min,
             {k: round(v, 3) for k, v in result.pred_distribution.items()},
-            {k: round(v, 3) for k, v in result.actual_distribution.items()},
         )
 
         fold_pred_df = df.loc[fold.test_idx, ["time", "open", "high", "low", "close", "label"]].copy()
@@ -233,6 +296,7 @@ def train_walk_forward(
         fold_pred_df["prob_0"] = test_probs[:, 0]
         fold_pred_df["prob_1"] = test_probs[:, 1]
         fold_pred_df["prob_2"] = test_probs[:, 2]
+        fold_pred_df["confidence"] = np.maximum(test_probs[:, 1], test_probs[:, 2])
         fold_pred_df["fold"] = fold.fold
         all_predictions.append(fold_pred_df)
 

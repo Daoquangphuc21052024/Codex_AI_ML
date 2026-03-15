@@ -8,6 +8,12 @@ import pandas as pd
 from .config import LabelingConfig
 
 
+@dataclass(frozen=True)
+class TradeProfile:
+    tp_points: float
+    sl_points: float
+
+
 @dataclass
 class LabelDiagnostics:
     label_counts: dict[int, int]
@@ -18,6 +24,9 @@ class LabelDiagnostics:
     usable_samples: int
     usable_ratio: float
     per_fold_label_distribution: dict[str, dict[str, int]]
+    tp_points: float
+    sl_points: float
+    tie_count: int
 
 
 @dataclass
@@ -29,6 +38,19 @@ class LabelMeta:
     ambiguity_score: float
     low_move_reject: bool
     conflict: bool
+
+
+def get_trade_profile(cfg: LabelingConfig) -> TradeProfile:
+    """Single source of truth for TP/SL semantics used by both labels and backtest.
+
+    Contract:
+    - Training labels and execution backtest both use one deterministic TP/SL profile.
+    - We pick the median of configured arrays to keep stable production behavior while
+      still allowing users to specify arrays in config for experimentation.
+    """
+    tp = float(np.median(np.array(cfg.tp_points, dtype=float)))
+    sl = float(np.median(np.array(cfg.sl_points, dtype=float)))
+    return TradeProfile(tp_points=tp, sl_points=sl)
 
 
 def _resolve_event(tp_hit: bool, sl_hit: bool, tie_breaker: str) -> str | None:
@@ -78,12 +100,7 @@ def _entry_index(i: int, cfg: LabelingConfig) -> int:
     raise ValueError(f"Unsupported labeling.entry_mode={cfg.entry_mode}")
 
 
-def _label_one(
-    df: pd.DataFrame,
-    i: int,
-    cfg: LabelingConfig,
-    combos: list[tuple[float, float]],
-) -> tuple[int, LabelMeta]:
+def _label_one(df: pd.DataFrame, i: int, cfg: LabelingConfig, profile: TradeProfile) -> tuple[int, LabelMeta, bool]:
     e_idx = _entry_index(i, cfg)
     entry = float(df.iloc[e_idx]["open"] if cfg.entry_mode == "next_open" else df.iloc[i]["close"])
 
@@ -93,25 +110,34 @@ def _label_one(
     future_high = future["high"].to_numpy(dtype=float)
     future_low = future["low"].to_numpy(dtype=float)
 
-    outcomes_buy = []
-    outcomes_sell = []
-    for tp, sl in combos:
-        outcomes_buy.append(_simulate_direction(future_high, future_low, entry, 1, tp, sl, cfg.tie_breaker))
-        outcomes_sell.append(_simulate_direction(future_high, future_low, entry, 2, tp, sl, cfg.tie_breaker))
-
-    buy_score = float(np.mean(outcomes_buy))
-    sell_score = float(np.mean(outcomes_sell))
+    buy_score = _simulate_direction(
+        future_high,
+        future_low,
+        entry,
+        1,
+        profile.tp_points,
+        profile.sl_points,
+        cfg.tie_breaker,
+    )
+    sell_score = _simulate_direction(
+        future_high,
+        future_low,
+        entry,
+        2,
+        profile.tp_points,
+        profile.sl_points,
+        cfg.tie_breaker,
+    )
 
     max_excursion = float(np.max(np.maximum(np.abs(future_high - entry), np.abs(future_low - entry))))
-    atr = float(df.iloc[i]["atr"]) if "atr" in df.columns else np.nan
+    atr = float(df.iloc[i]["atr_12"]) if "atr_12" in df.columns else np.nan
     low_move_reject = bool(np.isfinite(atr) and max_excursion < cfg.min_move_atr * atr)
 
     ambiguity = 1.0 - abs(buy_score - sell_score)
     conflict = (buy_score > 0 and sell_score > 0) or (buy_score < 0 and sell_score < 0)
+    tie_case = bool(np.isclose(buy_score, sell_score, atol=1e-12))
 
-    if low_move_reject:
-        label = 0
-    elif conflict:
+    if low_move_reject or conflict:
         label = 0
     elif buy_score >= cfg.dominance_threshold and sell_score <= 0:
         label = 1
@@ -123,28 +149,30 @@ def _label_one(
     meta = LabelMeta(
         entry_index=e_idx,
         entry_price=entry,
-        buy_score=buy_score,
-        sell_score=sell_score,
-        ambiguity_score=ambiguity,
+        buy_score=float(buy_score),
+        sell_score=float(sell_score),
+        ambiguity_score=float(ambiguity),
         low_move_reject=low_move_reject,
         conflict=conflict,
     )
-    return label, meta
+    return label, meta, tie_case
 
 
 def create_labels(df: pd.DataFrame, cfg: LabelingConfig) -> tuple[pd.DataFrame, LabelDiagnostics]:
     out = df.copy().reset_index(drop=True)
     n = len(out)
-    combos = [(tp, sl) for tp in cfg.tp_points for sl in cfg.sl_points]
+    profile = get_trade_profile(cfg)
 
     max_i = n - cfg.horizon_bars - (1 if cfg.entry_mode == "next_open" else 0)
     labels = np.zeros(max_i, dtype=np.int32)
     meta_rows: list[dict] = []
+    tie_count = 0
 
     for i in range(max_i):
-        label, meta = _label_one(out, i, cfg, combos)
+        label, meta, tie_case = _label_one(out, i, cfg, profile)
         labels[i] = label
         meta_rows.append(asdict(meta))
+        tie_count += int(tie_case)
 
     labeled = out.iloc[:max_i].copy().reset_index(drop=True)
     labeled["label"] = labels
@@ -159,13 +187,16 @@ def create_labels(df: pd.DataFrame, cfg: LabelingConfig) -> tuple[pd.DataFrame, 
 
     diagnostics = LabelDiagnostics(
         label_counts={int(k): int(v) for k, v in counts.items()},
-        combos_tested=len(combos),
+        combos_tested=1,
         ambiguous_count=ambiguous_count,
         low_move_rejected=low_move_rejected,
         conflict_count=conflict_count,
         usable_samples=usable,
         usable_ratio=float(usable / max(len(labeled), 1)),
         per_fold_label_distribution={},
+        tp_points=profile.tp_points,
+        sl_points=profile.sl_points,
+        tie_count=tie_count,
     )
     return labeled, diagnostics
 

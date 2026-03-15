@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BacktestConfig, LabelingConfig
-from .labeling import simulate_signal_outcome
+from .labeling import get_trade_profile, simulate_signal_outcome
 
 
 @dataclass
@@ -30,10 +30,6 @@ class TradeRecord:
     pnl_r: float
 
 
-def _select_trade_params(cfg: LabelingConfig) -> tuple[float, float]:
-    return float(np.median(np.array(cfg.tp_points, dtype=float))), float(np.median(np.array(cfg.sl_points, dtype=float)))
-
-
 def run_backtest(
     pred_df: pd.DataFrame,
     market_df: pd.DataFrame,
@@ -43,7 +39,12 @@ def run_backtest(
     pred = pred_df.sort_values("time").reset_index(drop=True).copy()
     market = market_df.sort_values("time").reset_index(drop=True).copy()
 
-    tp_points, sl_points = _select_trade_params(label_cfg)
+    # Backtest contract mirrors labeling contract exactly:
+    # - entry_mode controls signal-close vs next-open entry index
+    # - identical TP/SL profile from get_trade_profile()
+    # - same tie_breaker and horizon_bars
+    profile = get_trade_profile(label_cfg)
+    tp_points, sl_points = profile.tp_points, profile.sl_points
     trade_rows: list[TradeRecord] = []
 
     for row in pred.itertuples(index=False):
@@ -66,7 +67,7 @@ def run_backtest(
         future_high = future["high"].to_numpy(dtype=float)
         future_low = future["low"].to_numpy(dtype=float)
 
-        outcome_r, exit_reason, holding_bars = simulate_signal_outcome(
+        _, exit_reason, holding_bars = simulate_signal_outcome(
             future_high=future_high,
             future_low=future_low,
             entry=entry_price,
@@ -125,7 +126,7 @@ def run_backtest(
         pred["rolling_max"] = 1.0
         pred["drawdown"] = 0.0
         pred["is_win"] = False
-        return pred, trade_log, {"total_trades": 0}
+        return pred, trade_log, {"total_trades": 0, "tp_points": tp_points, "sl_points": sl_points}
 
     curve = pred[["time", "fold", "source_index"]].copy()
     curve["pnl_r"] = 0.0
@@ -151,5 +152,7 @@ def run_backtest(
         "expectancy": float(trade_log["pnl_r"].mean()),
         "max_drawdown": float(curve["drawdown"].min()),
         "final_equity": float(curve["equity"].iloc[-1]),
+        "tp_points": tp_points,
+        "sl_points": sl_points,
     }
     return curve, trade_log, summary

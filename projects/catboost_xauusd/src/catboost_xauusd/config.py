@@ -114,7 +114,7 @@ def _reject_legacy_keys(raw: dict[str, Any]) -> None:
         raise ValueError(
             "Detected legacy config keys from v0.1.x that are no longer supported. "
             f"mt5 legacy keys: {mt5_legacy or 'none'}, train legacy keys: {train_legacy or 'none'}. "
-            "Please migrate to v0.7.0 config schema using start_utc/end_utc and day-based walk-forward windows."
+            "Please migrate to v0.8.0 config schema using start_utc/end_utc and day-based walk-forward windows."
         )
 
 
