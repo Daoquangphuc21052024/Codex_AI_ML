@@ -4,8 +4,7 @@ import argparse
 import json
 import os
 import random
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np

@@ -177,7 +177,12 @@ def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "
     paths["rolling_pnl_png"] = p
 
     trades_df.to_csv(f"{out_dir}/{symbol}_trade_log.csv", index=False)
-    monthly = trades_df.set_index("exit_time")["pnl"].resample("M").agg(["sum", "count", "mean"])
+
+    # pandas mới đã deprecate/loại bỏ alias "M", dùng "ME" (month-end)
+    monthly_base = trades_df.copy()
+    monthly_base["exit_time"] = pd.to_datetime(monthly_base["exit_time"], errors="coerce")
+    monthly_base = monthly_base.dropna(subset=["exit_time"])
+    monthly = monthly_base.set_index("exit_time")["pnl"].resample("ME").agg(["sum", "count", "mean"])
     monthly.to_csv(f"{out_dir}/{symbol}_monthly_summary.csv")
     paths["trade_log_csv"] = f"{out_dir}/{symbol}_trade_log.csv"
     paths["monthly_summary_csv"] = f"{out_dir}/{symbol}_monthly_summary.csv"
