@@ -249,6 +249,7 @@ Nếu pass toàn bộ mới cho phép execute.
 - Vẽ line Entry/SL/TP1/TP2 khi setup active.
 - Prefix object thống nhất `ICTV3_<Magic>_`.
 - Log debug có prefix `[ICT_V3]`.
+- Nếu `InpShowStateComment = true`, EA sẽ dùng `Comment(...)` để hiển thị nhanh thông số state-machine trên chart: BUY/SELL context state, invalid reason, HTF bias, timeout và filter chính.
 
 ---
 

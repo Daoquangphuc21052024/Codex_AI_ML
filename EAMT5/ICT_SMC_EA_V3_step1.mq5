@@ -356,6 +356,7 @@ input bool InpShowSweep    = true;
 input bool InpShowFVG      = true;
 input bool InpShowOTE      = true;
 input bool InpShowEntry    = true;
+input bool InpShowStateComment = true;
 
 //============================================================
 // GLOBAL VARIABLES
@@ -480,6 +481,33 @@ void WriteDebugLog(string message)
    Print(g_logPrefix, "[", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), "] ", message);
 }
 
+string ContextStateLine(SetupContext &ctx)
+{
+   string text = DirectionToText(ctx.direction) + "=" + SetupStateToString(ctx.state);
+   if(ctx.invalidReasonCode != INVALID_NONE)
+      text += " (" + InvalidReasonToString(ctx.invalidReasonCode) + ")";
+   return text;
+}
+
+void UpdateStrategyStateComment()
+{
+   if(!InpShowStateComment)
+   {
+      Comment("");
+      return;
+   }
+
+   string status = "ICT SMC EA V3\n";
+   status += "Symbol=" + _Symbol + " TF=" + EnumToString(InpSignalTF) + " BiasTF=" + EnumToString(InpBiasTF) + "\n";
+   status += "HTF Bias=" + BiasToString(g_htfBias) + " | Spread=" + IntegerToString((int)g_symbol.Spread()) + "\n";
+   status += "BUY Ctx: " + ContextStateLine(g_buyCtx) + "\n";
+   status += "SELL Ctx: " + ContextStateLine(g_sellCtx) + "\n";
+   status += "Timeouts[sweep/setup/pending]=" + IntegerToString(InpSweepExpiryBars) + "/" + IntegerToString(InpSetupExpiryBars) + "/" + IntegerToString(InpPendingExpiryBars) + "\n";
+   status += "Filters[session/spreadMax]=" + (InpUseSessionFilter ? "ON" : "OFF") + "/" + IntegerToString(InpMaxSpreadPoints) + "\n";
+   status += "Entry[FVG/OTE/mode]=" + (InpUseFVG ? "ON" : "OFF") + "/" + (InpUseOTE ? "ON" : "OFF") + "/" + EnumToString(InpEntryMode);
+   Comment(status);
+}
+
 //============================================================
 // INITIALIZATION
 //============================================================
@@ -522,6 +550,7 @@ void OnDeinit(const int reason)
    if(g_atrHandle    != INVALID_HANDLE) IndicatorRelease(g_atrHandle);
    if(g_htfAtrHandle != INVALID_HANDLE) IndicatorRelease(g_htfAtrHandle);
    DeleteAllICTObjects();
+   Comment("");
    Print("ICT SMC EA v3 deinitialized. Reason: ", reason);
 }
 
@@ -607,7 +636,10 @@ void OnTick()
    }
 
    if(!isNewSignalBar)
+   {
+      UpdateStrategyStateComment();
       return;
+   }
 
    g_lastBarTime = currentBarTime;
 
@@ -637,6 +669,7 @@ void OnTick()
    }
 
    DrawICTObjects();
+   UpdateStrategyStateComment();
 }
 
 //============================================================
