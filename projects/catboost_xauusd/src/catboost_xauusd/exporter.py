@@ -41,7 +41,7 @@ def _verify_onnx_inference(
         if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
             onnx_pred = arr.astype(int)
             break
-        if arr.ndim == 2 and arr.shape[1] in (3,):
+        if arr.ndim == 2 and arr.shape[1] >= 2:
             onnx_pred = np.argmax(arr, axis=1).astype(int)
             break
     if onnx_pred is None:
@@ -60,29 +60,58 @@ def _verify_onnx_inference(
     return verification
 
 
+def _write_schema(path: Path, schema: dict) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(schema, file, ensure_ascii=False, indent=2)
+
+
 def export_artifacts(
-    model: CatBoostClassifier,
-    feature_cols: list[str],
-    sample_x: pd.DataFrame,
+    primary_model: CatBoostClassifier,
+    primary_feature_cols: list[str],
+    primary_sample_x: pd.DataFrame,
     artifacts_dir: str,
+    meta_model: CatBoostClassifier | None = None,
+    meta_feature_cols: list[str] | None = None,
+    meta_sample_x: pd.DataFrame | None = None,
 ) -> dict:
     out_dir = Path(artifacts_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    onnx_path = out_dir / "catboost_xauusd.onnx"
-    model.save_model(str(onnx_path), format="onnx")
+    primary_onnx_path = out_dir / "catboost_xauusd.onnx"
+    primary_model.save_model(str(primary_onnx_path), format="onnx")
 
-    schema = {
+    primary_schema = {
         "model_name": "catboost_xauusd_h1_multiclass",
         "pipeline_version": __version__,
         "input_name": "features",
-        "feature_order": feature_cols,
-        "feature_count": len(feature_cols),
+        "feature_order": primary_feature_cols,
+        "feature_count": len(primary_feature_cols),
         "dtype": "float32",
         "class_mapping": {"0": "no_trade", "1": "buy_tp_first", "2": "sell_tp_first"},
-        "example": sample_x[feature_cols].iloc[0].astype(float).to_dict(),
+        "example": primary_sample_x[primary_feature_cols].iloc[0].astype(float).to_dict(),
     }
-    with (out_dir / "feature_schema.json").open("w", encoding="utf-8") as file:
-        json.dump(schema, file, ensure_ascii=False, indent=2)
+    _write_schema(out_dir / "feature_schema.json", primary_schema)
 
-    return _verify_onnx_inference(model, onnx_path, sample_x, feature_cols)
+    result = {
+        "primary": _verify_onnx_inference(primary_model, primary_onnx_path, primary_sample_x, primary_feature_cols),
+        "meta": None,
+    }
+
+    if meta_model is not None and meta_feature_cols and meta_sample_x is not None and not meta_sample_x.empty:
+        meta_onnx_path = out_dir / "meta_filter.onnx"
+        meta_model.save_model(str(meta_onnx_path), format="onnx")
+        meta_schema = {
+            "model_name": "catboost_xauusd_h1_meta_filter",
+            "pipeline_version": __version__,
+            "input_name": "features",
+            "feature_order": meta_feature_cols,
+            "feature_count": len(meta_feature_cols),
+            "dtype": "float32",
+            "target": "primary_trade_acceptance",
+            "positive_class": "accept_primary_trade",
+            "example": meta_sample_x[meta_feature_cols].iloc[0].astype(float).to_dict(),
+        }
+        _write_schema(out_dir / "meta_feature_schema.json", meta_schema)
+        result["meta"] = _verify_onnx_inference(meta_model, meta_onnx_path, meta_sample_x, meta_feature_cols)
+
+    return result

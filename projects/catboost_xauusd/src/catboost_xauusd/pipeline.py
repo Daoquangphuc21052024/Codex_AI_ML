@@ -45,7 +45,7 @@ def run(config_path: str) -> None:
         dist = labeled_df.loc[fold.test_idx, "label"].value_counts().sort_index().to_dict()
         diagnostics.per_fold_label_distribution[f"fold_{fold.fold}"] = {str(int(k)): int(v) for k, v in dist.items()}
 
-    model, fold_results, pred_df, final_features = train_walk_forward(
+    model, meta_model, fold_results, pred_df, final_features, meta_features = train_walk_forward(
         labeled_df,
         candidate_features,
         folds,
@@ -54,11 +54,17 @@ def run(config_path: str) -> None:
         logger,
     )
 
+    pred_df_primary = pred_df.copy()
+    pred_df_primary["signal"] = pred_df_primary["signal_primary"]
+
+    backtest_curve_primary, trade_log_primary, backtest_summary_primary = run_backtest(
+        pred_df_primary, labeled_df, cfg.labeling, cfg.backtest
+    )
     backtest_curve, trade_log, backtest_summary = run_backtest(pred_df, labeled_df, cfg.labeling, cfg.backtest)
 
-    fi = pd.DataFrame(
-        {"feature": final_features, "importance": model.get_feature_importance()}
-    ).sort_values("importance", ascending=False)
+    fi = pd.DataFrame({"feature": final_features, "importance": model.get_feature_importance()}).sort_values(
+        "importance", ascending=False
+    )
 
     generate_plots(
         labeled_df=labeled_df,
@@ -70,13 +76,24 @@ def run(config_path: str) -> None:
         reports_dir=cfg.paths.reports_dir,
     )
 
-    onnx_verification = export_artifacts(model, final_features, labeled_df[final_features], cfg.paths.artifacts_dir)
+    meta_sample = pred_df[pred_df["signal_primary"] != 0].copy()
+    onnx_verification = export_artifacts(
+        primary_model=model,
+        primary_feature_cols=final_features,
+        primary_sample_x=labeled_df[final_features],
+        artifacts_dir=cfg.paths.artifacts_dir,
+        meta_model=meta_model,
+        meta_feature_cols=meta_features,
+        meta_sample_x=meta_sample,
+    )
 
     out_dir = Path(cfg.paths.artifacts_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     fi.to_csv(out_dir / "feature_importance.csv", index=False)
     backtest_curve.to_csv(out_dir / "backtest_results.csv", index=False)
     trade_log.to_csv(out_dir / "trade_log.csv", index=False)
+    backtest_curve_primary.to_csv(out_dir / "backtest_results_primary.csv", index=False)
+    trade_log_primary.to_csv(out_dir / "trade_log_primary.csv", index=False)
 
     fold_metrics = []
     fold_features = {}
@@ -88,8 +105,10 @@ def run(config_path: str) -> None:
                 "train_acc": fr.train_acc,
                 "val_acc": fr.val_acc,
                 "test_acc": fr.test_acc,
+                "primary_test_acc": fr.primary_test_acc,
                 "weighted_f1": fr.weighted_f1,
                 "macro_f1": fr.macro_f1,
+                "primary_macro_f1": fr.primary_macro_f1,
                 "balanced_acc": fr.balanced_acc,
                 "mcc": fr.mcc,
                 "overfit_gap": fr.overfit_gap,
@@ -97,8 +116,12 @@ def run(config_path: str) -> None:
                 "trade_threshold": fr.trade_threshold,
                 "side_margin": fr.side_margin,
                 "expected_edge_min": fr.expected_edge_min,
+                "meta_threshold": fr.meta_threshold,
+                "meta_precision": fr.meta_precision,
+                "meta_recall": fr.meta_recall,
                 "n_selected_features": len(fr.selected_features),
                 "pred_dist": json.dumps(fr.pred_distribution),
+                "primary_pred_dist": json.dumps(fr.primary_pred_distribution),
                 "actual_dist": json.dumps(fr.actual_distribution),
             }
         )
@@ -162,6 +185,25 @@ def run(config_path: str) -> None:
     with (out_dir / "backtest_summary.json").open("w", encoding="utf-8") as f:
         json.dump(backtest_summary, f, ensure_ascii=False, indent=2)
 
+    with (out_dir / "backtest_summary_primary.json").open("w", encoding="utf-8") as f:
+        json.dump(backtest_summary_primary, f, ensure_ascii=False, indent=2)
+
+    with (out_dir / "meta_filter_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "primary_trade_count": int((pred_df["signal_primary"] != 0).sum()),
+                "filtered_trade_count": int((pred_df["signal"] != 0).sum()),
+                "trades_removed": int((pred_df["signal_primary"] != 0).sum() - (pred_df["signal"] != 0).sum()),
+                "primary_winrate": float(backtest_summary_primary.get("winrate", 0.0)),
+                "filtered_winrate": float(backtest_summary.get("winrate", 0.0)),
+                "primary_final_equity": float(backtest_summary_primary.get("final_equity", 1.0)),
+                "filtered_final_equity": float(backtest_summary.get("final_equity", 1.0)),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
     with (out_dir / "trade_definition.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
@@ -171,6 +213,8 @@ def run(config_path: str) -> None:
                 "tp_points": diagnostics.tp_points,
                 "sl_points": diagnostics.sl_points,
                 "label_no_trade_semantics": "low_move_or_conflict_or_non_dominant",
+                "meta_role": "confirmation_filter",
+                "meta_contract": "trade only if primary side!=0 and meta_prob>=meta_threshold",
             },
             f,
             ensure_ascii=False,
