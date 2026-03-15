@@ -678,10 +678,20 @@ void DetectTierSwing(int tier, int leftBars, int rightBars)
    for(int i=1;i<=leftBars;i++){ if(iHigh(_Symbol, InpSignalTF, pivotBar + i) >= pivotHigh) isSwingHigh=false; if(iLow(_Symbol, InpSignalTF, pivotBar + i) <= pivotLow) isSwingLow=false; }
    for(int i=1;i<=rightBars;i++){ if(iHigh(_Symbol, InpSignalTF, pivotBar - i) >= pivotHigh) isSwingHigh=false; if(iLow(_Symbol, InpSignalTF, pivotBar - i) <= pivotLow) isSwingLow=false; }
 
-   SwingPoint &arr[] = (tier == SWING_INTERNAL ? g_internalSwings : g_externalSwings);
-   int &count = (tier == SWING_INTERNAL ? g_internalCount : g_externalCount);
-   if(isSwingHigh && !SwingExists(arr,count,pivotTime,true,tier)) AddSwingToArray(arr,count,pivotTime,pivotHigh,true,pivotBar,tier);
-   if(isSwingLow && !SwingExists(arr,count,pivotTime,false,tier)) AddSwingToArray(arr,count,pivotTime,pivotLow,false,pivotBar,tier);
+   if(tier == SWING_INTERNAL)
+   {
+      if(isSwingHigh && !SwingExists(g_internalSwings,g_internalCount,pivotTime,true,tier))
+         AddSwingToArray(g_internalSwings,g_internalCount,pivotTime,pivotHigh,true,pivotBar,tier);
+      if(isSwingLow && !SwingExists(g_internalSwings,g_internalCount,pivotTime,false,tier))
+         AddSwingToArray(g_internalSwings,g_internalCount,pivotTime,pivotLow,false,pivotBar,tier);
+   }
+   else
+   {
+      if(isSwingHigh && !SwingExists(g_externalSwings,g_externalCount,pivotTime,true,tier))
+         AddSwingToArray(g_externalSwings,g_externalCount,pivotTime,pivotHigh,true,pivotBar,tier);
+      if(isSwingLow && !SwingExists(g_externalSwings,g_externalCount,pivotTime,false,tier))
+         AddSwingToArray(g_externalSwings,g_externalCount,pivotTime,pivotLow,false,pivotBar,tier);
+   }
 }
 
 bool SwingExists(SwingPoint &arr[], int count, datetime t, bool isHigh, int tier){ for(int i=0;i<count;i++) if(arr[i].time==t && arr[i].isHigh==isHigh && arr[i].tier==tier) return true; return false; }
@@ -689,32 +699,57 @@ void AddSwingToArray(SwingPoint &arr[], int &count, datetime t, double price, bo
 
 bool GetLastUnbrokenSwing(int tier, bool wantHigh, SwingPoint &out)
 {
-   SwingPoint &arr[] = (tier == SWING_INTERNAL ? g_internalSwings : g_externalSwings);
-   int count = (tier == SWING_INTERNAL ? g_internalCount : g_externalCount);
-   for(int i=count-1;i>=0;i--) if(arr[i].isHigh==wantHigh && !arr[i].broken){ out=arr[i]; return true; }
+   if(tier == SWING_INTERNAL)
+   {
+      for(int i=g_internalCount-1;i>=0;i--)
+         if(g_internalSwings[i].isHigh==wantHigh && !g_internalSwings[i].broken){ out=g_internalSwings[i]; return true; }
+   }
+   else
+   {
+      for(int i=g_externalCount-1;i>=0;i--)
+         if(g_externalSwings[i].isHigh==wantHigh && !g_externalSwings[i].broken){ out=g_externalSwings[i]; return true; }
+   }
    return false;
 }
 
 bool GetLastTwoSwings(int tier, bool wantHigh, SwingPoint &latest, SwingPoint &previous)
 {
-   SwingPoint &arr[] = (tier == SWING_INTERNAL ? g_internalSwings : g_externalSwings);
-   int count = (tier == SWING_INTERNAL ? g_internalCount : g_externalCount);
    int found=0;
-   for(int i=count-1;i>=0;i--)
+   if(tier == SWING_INTERNAL)
    {
-      if(arr[i].isHigh!=wantHigh) continue;
-      if(found==0) latest=arr[i];
-      else { previous=arr[i]; return true; }
-      found++;
+      for(int i=g_internalCount-1;i>=0;i--)
+      {
+         if(g_internalSwings[i].isHigh!=wantHigh) continue;
+         if(found==0) latest=g_internalSwings[i];
+         else { previous=g_internalSwings[i]; return true; }
+         found++;
+      }
+   }
+   else
+   {
+      for(int i=g_externalCount-1;i>=0;i--)
+      {
+         if(g_externalSwings[i].isHigh!=wantHigh) continue;
+         if(found==0) latest=g_externalSwings[i];
+         else { previous=g_externalSwings[i]; return true; }
+         found++;
+      }
    }
    return false;
 }
 
 void MarkSwingBroken(int tier, datetime t, bool isHigh)
 {
-   SwingPoint &arr[] = (tier == SWING_INTERNAL ? g_internalSwings : g_externalSwings);
-   int count = (tier == SWING_INTERNAL ? g_internalCount : g_externalCount);
-   for(int i=0;i<count;i++) if(arr[i].time==t && arr[i].isHigh==isHigh){ arr[i].broken=true; break; }
+   if(tier == SWING_INTERNAL)
+   {
+      for(int i=0;i<g_internalCount;i++)
+         if(g_internalSwings[i].time==t && g_internalSwings[i].isHigh==isHigh){ g_internalSwings[i].broken=true; break; }
+   }
+   else
+   {
+      for(int i=0;i<g_externalCount;i++)
+         if(g_externalSwings[i].time==t && g_externalSwings[i].isHigh==isHigh){ g_externalSwings[i].broken=true; break; }
+   }
 }
 
 int DetermineInternalTrend()
