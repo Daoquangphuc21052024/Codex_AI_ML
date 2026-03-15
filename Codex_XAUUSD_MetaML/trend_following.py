@@ -4,8 +4,7 @@ import argparse
 import json
 import os
 import random
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +16,7 @@ from sklearn.preprocessing import RobustScaler
 from data_lib import build_split_visualization, generate_synthetic_ohlc, read_price_csv
 from evaluation_lib import classification_metrics, optimize_threshold, save_classification_reports, save_feature_importance
 from export_lib import export_artifacts
-from features_lib import build_features
+from features_lib import build_features, select_main_features_train_only
 from labeling_lib import SEED, create_labels, evaluate_label_quality
 from search_lib import run_param_search
 from tester_lib import backtest_signals, save_backtest_reports
@@ -99,6 +98,50 @@ def _build_dataset(use_synthetic_if_missing: bool = False):
     return data, fs.main_features, fs.meta_features
 
 
+def _signal_from_probability(prob_sell: np.ndarray, sell_threshold: float) -> np.ndarray:
+    buy_threshold = 1.0 - sell_threshold
+    signal = np.full(len(prob_sell), np.nan, dtype=float)
+    signal[prob_sell >= sell_threshold] = 1.0
+    signal[prob_sell <= buy_threshold] = 0.0
+    return signal
+
+
+def _select_threshold_by_validation_trading(
+    val_index: pd.Index,
+    val_close: pd.Series,
+    val_prob_main: np.ndarray,
+    val_prob_meta: np.ndarray,
+    threshold_candidates: list[float],
+) -> tuple[float, pd.DataFrame]:
+    rows = []
+    for t in threshold_candidates:
+        pred = pd.DataFrame(index=val_index)
+        pred["close"] = val_close.loc[val_index]
+        pred["labels"] = _signal_from_probability(val_prob_main, t)
+        pred["meta_labels"] = (val_prob_meta >= 0.5).astype(float)
+
+        trades_df, m = backtest_signals(
+            pred,
+            stop=HP.stop_loss,
+            take=HP.take_profit,
+            markup=HP.markup,
+            max_hold=120,
+            signal_shift=1,
+        )
+
+        score = m["pnl"]
+        if m["trades"] < 50:
+            score -= 1000.0
+        if m["profit_factor"] < 1.0:
+            score -= 500.0
+
+        rows.append({"threshold": t, "score": score, **m})
+
+    res = pd.DataFrame(rows).sort_values(["score", "profit_factor", "pnl"], ascending=False)
+    best_t = float(res.iloc[0]["threshold"])
+    return best_t, res
+
+
 def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = False):
     Path("reports").mkdir(exist_ok=True)
     Path(HP.export_path).mkdir(parents=True, exist_ok=True)
@@ -111,6 +154,36 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     X_meta = data[meta_features]
     y_main = data["labels"].astype(int)
     y_meta = data["meta_target"].astype(int)
+
+    train_X_raw, train_y_raw, val_X_raw, val_y, test_X_raw, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
+    train_Xm_raw, train_ym, val_Xm_raw, val_ym, test_Xm_raw, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
+
+    fs_result = select_main_features_train_only(
+        X_train=train_X_raw,
+        y_train=train_y_raw,
+        feature_names=main_features,
+        corr_threshold=0.96,
+        min_features=16,
+        random_seed=SEED,
+    )
+    main_features = fs_result.selected_features
+    fs_result.importance_table.to_csv("reports/feature_selection_importance.csv", index=False)
+    with open("reports/feature_selection_summary.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "n_original": len(X_main.columns),
+                "n_selected": len(main_features),
+                "removed_zero_importance": fs_result.removed_zero_importance,
+                "removed_high_correlation": fs_result.removed_high_correlation,
+                "selected_features": main_features,
+            },
+            f,
+            indent=2,
+        )
+
+    X_main = X_main[main_features]
+    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
+    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
 
     if run_search:
         search_space = {
@@ -131,9 +204,6 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         )
     else:
         best_params = {"depth": 6, "learning_rate": 0.05, "l2_leaf_reg": 3.0, "iterations": HP.main_iterations}
-
-    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
-    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
 
     train_X_s, val_X_s, test_X_s, train_Xm_s, val_Xm_s, test_Xm_s, scaler_main, scaler_meta = _normalize_features(
         train_X, val_X, test_X, train_Xm, val_Xm, test_Xm
@@ -168,11 +238,28 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     meta_model.fit(train_Xm_s, train_ym, eval_set=(val_Xm_s, val_ym))
 
     val_prob = model.predict_proba(val_X_s)[:, 1]
-    best_t, threshold_pack = optimize_threshold(val_y, val_prob)
-    pd.DataFrame(threshold_pack["all"]).to_csv("reports/threshold_search.csv", index=False)
+    meta_val_prob = meta_model.predict_proba(val_Xm_s)[:, 1]
+
+    # (1) ML-based threshold (macro-f1 + anti-collapse)
+    best_t_ml, threshold_pack = optimize_threshold(val_y, val_prob)
+    pd.DataFrame(threshold_pack["all"]).to_csv("reports/threshold_search_ml.csv", index=False)
+
+    # (2) Trading-based threshold on validation only (no test leakage)
+    threshold_candidates = [round(x, 3) for x in np.arange(0.50, 0.70, 0.01)]
+    best_t_trade, threshold_trade_df = _select_threshold_by_validation_trading(
+        val_index=val_X.index,
+        val_close=data["close"],
+        val_prob_main=val_prob,
+        val_prob_meta=meta_val_prob,
+        threshold_candidates=threshold_candidates,
+    )
+    threshold_trade_df.to_csv("reports/threshold_search_trading.csv", index=False)
+
+    # Pick threshold by validation trading score; fallback to ML threshold if degenerate
+    best_t = best_t_trade if np.isfinite(best_t_trade) else best_t_ml
 
     test_prob = model.predict_proba(test_X_s)[:, 1]
-    metrics_cls, y_pred_test, _ = classification_metrics(test_y, test_prob, threshold=best_t)
+    metrics_cls, _, _ = classification_metrics(test_y, test_prob, threshold=best_t)
     with open("reports/classification_metrics_test.json", "w", encoding="utf-8") as f:
         json.dump(metrics_cls, f, indent=2)
     save_classification_reports(test_y, test_prob, best_t, HP.symbol, out_dir="reports")
@@ -180,7 +267,7 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     meta_prob = meta_model.predict_proba(test_Xm_s)[:, 1]
     pred_df = pd.DataFrame(index=test_X.index)
     pred_df["close"] = data.loc[test_X.index, "close"]
-    pred_df["labels"] = (test_prob >= best_t).astype(float)
+    pred_df["labels"] = _signal_from_probability(test_prob, best_t)
     pred_df["meta_labels"] = (meta_prob >= 0.5).astype(float)
 
     trades_df, trading_metrics = backtest_signals(
@@ -204,7 +291,9 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "test_ratio": 1 - HP.train_ratio - HP.val_ratio,
         "n_features_main": len(main_features),
         "n_features_meta": len(meta_features),
-        "best_threshold": best_t,
+        "best_threshold_sell": best_t,
+        "best_threshold_buy": 1.0 - best_t,
+        "threshold_source": "validation_trading",
         "classification_metrics_test": metrics_cls,
         "trading_metrics_test": trading_metrics,
         "best_main_params": {
@@ -219,6 +308,11 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
         "val_period": {"start": str(val_X.index.min()), "end": str(val_X.index.max())},
         "test_period": {"start": str(test_X.index.min()), "end": str(test_X.index.max())},
         "seed": SEED,
+        "feature_selection": {
+            "removed_zero_importance": fs_result.removed_zero_importance,
+            "removed_high_correlation": fs_result.removed_high_correlation,
+            "selected_features": main_features,
+        },
     }
 
     exported = export_artifacts(

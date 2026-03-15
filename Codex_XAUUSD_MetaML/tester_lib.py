@@ -115,6 +115,8 @@ def backtest_signals(
     dd = _drawdown(trades_df["cum_pnl"])
     r = trades_df["pnl"]
     downside = r[r < 0]
+    downside_std = float(downside.std(ddof=0)) if len(downside) else 0.0
+    total_std = float(r.std(ddof=0)) if len(r) else 0.0
 
     metrics = {
         "trades": int(len(trades_df)),
@@ -124,8 +126,8 @@ def backtest_signals(
         "expectancy": float(trades_df["pnl"].mean()),
         "pnl": float(trades_df["pnl"].sum()),
         "max_drawdown": float(dd.min()),
-        "sharpe_like": float(r.mean() / (r.std() + 1e-12)),
-        "sortino_like": float(r.mean() / (downside.std() + 1e-12)) if len(downside) else 0.0,
+        "sharpe_like": float(r.mean() / (total_std + 1e-12)),
+        "sortino_like": float(r.mean() / downside_std) if downside_std > 1e-12 else 0.0,
         "long_trades": int((trades_df["side"] == "buy").sum()),
         "short_trades": int((trades_df["side"] == "sell").sum()),
     }
@@ -177,7 +179,12 @@ def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "
     paths["rolling_pnl_png"] = p
 
     trades_df.to_csv(f"{out_dir}/{symbol}_trade_log.csv", index=False)
-    monthly = trades_df.set_index("exit_time")["pnl"].resample("M").agg(["sum", "count", "mean"])
+
+    # pandas mới đã deprecate/loại bỏ alias "M", dùng "ME" (month-end)
+    monthly_base = trades_df.copy()
+    monthly_base["exit_time"] = pd.to_datetime(monthly_base["exit_time"], errors="coerce")
+    monthly_base = monthly_base.dropna(subset=["exit_time"])
+    monthly = monthly_base.set_index("exit_time")["pnl"].resample("ME").agg(["sum", "count", "mean"])
     monthly.to_csv(f"{out_dir}/{symbol}_monthly_summary.csv")
     paths["trade_log_csv"] = f"{out_dir}/{symbol}_trade_log.csv"
     paths["monthly_summary_csv"] = f"{out_dir}/{symbol}_monthly_summary.csv"
