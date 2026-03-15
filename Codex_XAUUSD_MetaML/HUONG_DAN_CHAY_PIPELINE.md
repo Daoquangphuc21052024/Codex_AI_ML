@@ -116,7 +116,7 @@ export MT5_INCLUDE_PATH="/path/to/MT5/MQL5/Include/TrendFollowing"
 ## 6) Chạy full pipeline
 
 ```bash
-python trend_following.py
+python trend_following.py --mode train
 ```
 
 Pipeline sẽ chạy lần lượt:
@@ -196,7 +196,7 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install MetaTrader5 catboost scikit-learn pandas numpy numba scipy matplotlib joblib
 python download_mt5_data.py
-python trend_following.py
+python trend_following.py --mode train
 ```
 
 ### Windows PowerShell
@@ -208,7 +208,20 @@ python -m venv .venv
 pip install --upgrade pip
 pip install MetaTrader5 catboost scikit-learn pandas numpy numba scipy matplotlib joblib
 python download_mt5_data.py
-python trend_following.py
+python trend_following.py --mode train
 ```
 
 Chúc bạn chạy pipeline thuận lợi 🚀
+
+
+## 10) Chạy hyperparameter search
+
+```bash
+python trend_following.py --mode search
+```
+
+## 11) Chạy smoke test không cần dữ liệu MT5
+
+```bash
+python trend_following.py --mode train --synthetic
+```

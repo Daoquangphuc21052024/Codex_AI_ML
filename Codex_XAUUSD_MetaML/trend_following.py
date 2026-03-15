@@ -1,312 +1,259 @@
 from __future__ import annotations
 
-import math
+import argparse
+import json
 import os
 import random
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
 from sklearn.cluster import KMeans
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import RobustScaler
 
+from data_lib import build_split_visualization, generate_synthetic_ohlc, read_price_csv
+from evaluation_lib import classification_metrics, optimize_threshold, save_classification_reports, save_feature_importance
 from export_lib import export_artifacts
-from labeling_lib import SEED, create_labels
-from tester_lib import tester
+from features_lib import build_features
+from labeling_lib import SEED, create_labels, evaluate_label_quality
+from search_lib import run_param_search
+from tester_lib import backtest_signals, save_backtest_reports
 
 np.random.seed(SEED)
 random.seed(SEED)
 
-hyper_params = {
-    "symbol": "XAUUSD_H1",
-    "export_path": os.environ.get("MT5_INCLUDE_PATH", os.path.join(os.getcwd(), "exports")),
-    "model_number": 0,
-    "markup": 0.35,
-    "stop_loss": 8.0,
-    "take_profit": 4.0,
-    "periods": [5, 35, 65, 95, 125, 155, 185, 215, 245, 275],
-    "periods_meta": [50, 100, 200],
-    "atr_window": 14,
-    "backward": datetime(2000, 1, 1),
-    "forward": datetime(2024, 1, 1),
-    "full_forward": datetime(2026, 1, 1),
-    "n_clusters": 5,
-    "rolling": [10, 30, 60],
-    "train_ratio": 0.6,
-    "val_ratio": 0.2,
-    "wf_splits": 2,
-    "min_r2": 0.0,
-}
+
+@dataclass
+class HyperParams:
+    symbol: str = "XAUUSD_H1"
+    export_path: str = os.path.join(os.getcwd(), "exports")
+    model_number: int = 0
+    markup: float = 0.35
+    stop_loss: float = 8.0
+    take_profit: float = 4.0
+    periods: tuple[int, ...] = (5, 35, 65, 95, 125, 155, 185, 215, 245, 275)
+    periods_meta: tuple[int, ...] = (50, 100, 200)
+    atr_window: int = 14
+    n_clusters: int = 5
+    train_ratio: float = 0.6
+    val_ratio: float = 0.2
+    wf_splits: int = 2
+    min_f1: float = 0.45
+    main_iterations: int = 300
+    meta_iterations: int = 250
 
 
-def get_prices() -> pd.DataFrame:
-    filepath = f"files/{hyper_params['symbol']}.csv"
-    with open(filepath, "r", encoding="utf-8") as f:
-        header = f.readline().strip()
-
-    if "<DATE>" in header or "<CLOSE>" in header:
-        p = pd.read_csv(filepath, sep=r"\s+")
-        df = pd.DataFrame()
-        df["time"] = p["<DATE>"].astype(str) + " " + p["<TIME>"].astype(str)
-        df["close"] = p["<CLOSE>"]
-        df["high"] = p["<HIGH>"]
-        df["low"] = p["<LOW>"]
-    else:
-        p = pd.read_csv(filepath)
-        p.columns = [c.strip().lower() for c in p.columns]
-        time_col = next(c for c in p.columns if c in {"time", "date", "datetime", "timestamp"})
-        close_col = next(c for c in p.columns if c == "close")
-        high_col = next(c for c in p.columns if c == "high")
-        low_col = next(c for c in p.columns if c == "low")
-        df = pd.DataFrame({
-            "time": p[time_col],
-            "close": p[close_col],
-            "high": p[high_col],
-            "low": p[low_col],
-        })
-
-    df["time"] = pd.to_datetime(df["time"])
-    df.set_index("time", inplace=True)
-    df = df.sort_index()
-    return df.dropna()
-
-
-def get_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    close = out["close"]
-    high = out["high"]
-    low = out["low"]
-
-    for n in hyper_params["periods"]:
-        ma = close.rolling(n).mean()
-        out[f"ma_dev_{n}"] = (close / ma) - 1
-        out[f"mom_{n}"] = (close / close.shift(n)) - 1
-        out[f"volratio_{n}"] = close.rolling(n).std() / (close.rolling(n * 3).std() + 1e-12)
-        rolling_low = close.rolling(n).min()
-        rolling_high = close.rolling(n).max()
-        out[f"pos_{n}"] = (close - rolling_low) / ((rolling_high - rolling_low) + 1e-12)
-        out[f"rsi_like_{n}"] = (close.diff() > 0).rolling(n).mean()
-
-    atr = (high - low).rolling(hyper_params["atr_window"]).mean() / close
-    for n in hyper_params["periods_meta"]:
-        out[f"skew_meta_{n}"] = close.rolling(n).skew()
-    out["atr_meta"] = atr
-
-    return out.dropna()
+HP = HyperParams(export_path=os.environ.get("MT5_INCLUDE_PATH", os.path.join(os.getcwd(), "exports")))
 
 
 def _time_split_3way(X, y, train_ratio=0.6, val_ratio=0.2):
     n = len(X)
     i_val = int(n * train_ratio)
     i_test = int(n * (train_ratio + val_ratio))
-    return (
-        X.iloc[:i_val], y.iloc[:i_val],
-        X.iloc[i_val:i_test], y.iloc[i_val:i_test],
-        X.iloc[i_test:], y.iloc[i_test:],
-    )
+    return X.iloc[:i_val], y.iloc[:i_val], X.iloc[i_val:i_test], y.iloc[i_val:i_test], X.iloc[i_test:], y.iloc[i_test:]
 
 
-def normalize_features(X_train, X_val, X_test, X_meta_train, X_meta_val, X_meta_test):
+def _normalize_features(X_train, X_val, X_test, X_meta_train, X_meta_val, X_meta_test):
     scaler_main = RobustScaler()
+    scaler_meta = RobustScaler()
+
     X_train_s = scaler_main.fit_transform(X_train)
     X_val_s = scaler_main.transform(X_val)
     X_test_s = scaler_main.transform(X_test)
 
-    scaler_meta = RobustScaler()
     Xm_train_s = scaler_meta.fit_transform(X_meta_train)
     Xm_val_s = scaler_meta.transform(X_meta_val)
     Xm_test_s = scaler_meta.transform(X_meta_test)
-
     return X_train_s, X_val_s, X_test_s, Xm_train_s, Xm_val_s, Xm_test_s, scaler_main, scaler_meta
 
 
-def get_volatility_regime(data: pd.DataFrame, n_clusters: int, train_ratio: float = 0.6):
-    meta_cols = [c for c in data.columns if c.endswith("_meta")]
-    meta_X = data[meta_cols].dropna()
+def _fit_cluster_train_only(data: pd.DataFrame, meta_features: list[str], n_clusters: int, train_ratio: float):
+    meta_X = data[meta_features].dropna()
     split_idx = int(len(meta_X) * train_ratio)
-    meta_train = meta_X.iloc[:split_idx]
-
     km = KMeans(n_clusters=n_clusters, random_state=SEED, n_init=10)
-    km.fit(meta_train)
+    km.fit(meta_X.iloc[:split_idx])
     labels = km.predict(meta_X)
     return pd.Series(labels, index=meta_X.index, name="clusters")
 
 
-def walk_forward_score(model, meta_model, X_test_s, X_meta_test_s, test_index, close_series):
-    tscv = TimeSeriesSplit(n_splits=hyper_params["wf_splits"])
-    scores = []
+def _build_dataset(use_synthetic_if_missing: bool = False):
+    csv_path = f"files/{HP.symbol}.csv"
+    if Path(csv_path).exists():
+        prices = read_price_csv(csv_path)
+    elif use_synthetic_if_missing:
+        prices = generate_synthetic_ohlc(n=4000, seed=SEED)
+    else:
+        raise FileNotFoundError(f"Missing input file: {csv_path}")
 
-    X_test_df = pd.DataFrame(X_test_s, index=test_index)
-    Xm_test_df = pd.DataFrame(X_meta_test_s, index=test_index)
+    fs = build_features(prices, periods=list(HP.periods), periods_meta=list(HP.periods_meta), atr_window=HP.atr_window)
+    labels = create_labels(fs.data["close"], fs.data["high"], fs.data["low"], train_ratio=HP.train_ratio)
+    data = fs.data.join(labels, how="inner")
+    data = data[data["labels"].isin([0, 1])].copy()
 
-    for _, test_idx in tscv.split(X_test_df):
-        idx = X_test_df.index[test_idx]
-        fold_X = X_test_df.iloc[test_idx].to_numpy()
-        fold_Xm = Xm_test_df.iloc[test_idx].to_numpy()
+    clusters = _fit_cluster_train_only(data, fs.meta_features, HP.n_clusters, HP.train_ratio)
+    data = data.join(clusters, how="inner")
+    data = data.dropna().copy()
+    return data, fs.main_features, fs.meta_features
 
-        pr_fold = pd.DataFrame(index=idx)
-        pr_fold["close"] = close_series.loc[idx]
-        pr_fold["labels"] = (model.predict_proba(fold_X)[:, 1] >= 0.5).astype(float)
-        pr_fold["meta_labels"] = (meta_model.predict_proba(fold_Xm)[:, 1] >= 0.5).astype(float)
 
-        r2 = tester(
-            pr_fold,
-            hyper_params["stop_loss"],
-            hyper_params["take_profit"],
-            idx.max(),
-            idx.min(),
-            hyper_params["markup"],
-            False,
-            hyper_params["symbol"],
-            tag="wf",
+def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = False):
+    Path("reports").mkdir(exist_ok=True)
+    Path(HP.export_path).mkdir(parents=True, exist_ok=True)
+
+    data, main_features, meta_features = _build_dataset(use_synthetic_if_missing=use_synthetic_if_missing)
+    evaluate_label_quality(data, out_dir="reports")
+    build_split_visualization(data, HP.train_ratio, HP.val_ratio)
+
+    X_main = data[main_features]
+    X_meta = data[meta_features]
+    y_main = data["labels"].astype(int)
+    y_meta = data["meta_target"].astype(int)
+
+    if run_search:
+        search_space = {
+            "depth": [4, 6, 8],
+            "learning_rate": [0.03, 0.05, 0.08],
+            "l2_leaf_reg": [2.0, 5.0, 8.0],
+            "iterations": [150, 250, 350],
+        }
+        best_params, _ = run_param_search(
+            X_main,
+            y_main,
+            train_ratio=HP.train_ratio,
+            val_ratio=HP.val_ratio,
+            search_space=search_space,
+            out_dir="reports",
+            max_trials=20,
+            seed=SEED,
         )
-        if not math.isnan(r2):
-            scores.append(r2)
+    else:
+        best_params = {"depth": 6, "learning_rate": 0.05, "l2_leaf_reg": 3.0, "iterations": HP.main_iterations}
 
-    if not scores:
-        return -1.0, 1.0
-    return float(np.mean(scores)), float(np.std(scores))
+    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(X_main, y_main, HP.train_ratio, HP.val_ratio)
+    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(X_meta, y_meta, HP.train_ratio, HP.val_ratio)
 
-
-def fit_final_models(dataset: pd.DataFrame):
-    feature_cols = [
-        c for c in dataset.columns
-        if any(c.startswith(p) for p in ["ma_dev_", "mom_", "volratio_", "pos_", "rsi_like_"])
-    ]
-    meta_cols = [c for c in dataset.columns if c.endswith("_meta")]
-
-    X_all = dataset[feature_cols]
-    X_meta_all = dataset[meta_cols]
-    y_main = dataset["labels"].astype("int16")
-    y_meta = dataset["meta_target"].astype("int16")
-
-    train_X, train_y, val_X, val_y, test_X, test_y = _time_split_3way(
-        X_all, y_main, hyper_params["train_ratio"], hyper_params["val_ratio"]
-    )
-    train_Xm, train_ym, val_Xm, val_ym, test_Xm, test_ym = _time_split_3way(
-        X_meta_all, y_meta, hyper_params["train_ratio"], hyper_params["val_ratio"]
-    )
-
-    train_X_s, val_X_s, test_X_s, train_Xm_s, val_Xm_s, test_Xm_s, scaler_main, scaler_meta = normalize_features(
+    train_X_s, val_X_s, test_X_s, train_Xm_s, val_Xm_s, test_Xm_s, scaler_main, scaler_meta = _normalize_features(
         train_X, val_X, test_X, train_Xm, val_Xm, test_Xm
     )
 
     model = CatBoostClassifier(
-        iterations=200,
-        eval_metric="Accuracy",
-        use_best_model=True,
-        early_stopping_rounds=20,
+        depth=int(best_params["depth"]),
+        learning_rate=float(best_params["learning_rate"]),
+        l2_leaf_reg=float(best_params["l2_leaf_reg"]),
+        iterations=int(best_params["iterations"]),
+        eval_metric="F1",
         random_seed=SEED,
-        task_type="CPU",
         verbose=False,
+        use_best_model=True,
+        early_stopping_rounds=30,
+        auto_class_weights="Balanced",
     )
     model.fit(train_X_s, train_y, eval_set=(val_X_s, val_y))
 
     meta_model = CatBoostClassifier(
-        iterations=200,
+        depth=6,
+        learning_rate=0.05,
+        l2_leaf_reg=3.0,
+        iterations=HP.meta_iterations,
         eval_metric="F1",
-        use_best_model=True,
-        early_stopping_rounds=20,
         random_seed=SEED,
-        task_type="CPU",
         verbose=False,
+        use_best_model=True,
+        early_stopping_rounds=30,
+        auto_class_weights="Balanced",
     )
     meta_model.fit(train_Xm_s, train_ym, eval_set=(val_Xm_s, val_ym))
 
-    wf_mean, wf_std = walk_forward_score(
-        model,
-        meta_model,
-        test_X_s,
-        test_Xm_s,
-        test_X.index,
-        dataset["close"],
+    val_prob = model.predict_proba(val_X_s)[:, 1]
+    best_t, threshold_pack = optimize_threshold(val_y, val_prob)
+    pd.DataFrame(threshold_pack["all"]).to_csv("reports/threshold_search.csv", index=False)
+
+    test_prob = model.predict_proba(test_X_s)[:, 1]
+    metrics_cls, y_pred_test, _ = classification_metrics(test_y, test_prob, threshold=best_t)
+    with open("reports/classification_metrics_test.json", "w", encoding="utf-8") as f:
+        json.dump(metrics_cls, f, indent=2)
+    save_classification_reports(test_y, test_prob, best_t, HP.symbol, out_dir="reports")
+
+    meta_prob = meta_model.predict_proba(test_Xm_s)[:, 1]
+    pred_df = pd.DataFrame(index=test_X.index)
+    pred_df["close"] = data.loc[test_X.index, "close"]
+    pred_df["labels"] = (test_prob >= best_t).astype(float)
+    pred_df["meta_labels"] = (meta_prob >= 0.5).astype(float)
+
+    trades_df, trading_metrics = backtest_signals(
+        pred_df,
+        stop=HP.stop_loss,
+        take=HP.take_profit,
+        markup=HP.markup,
+        max_hold=120,
+        signal_shift=1,
     )
+    save_backtest_reports(trades_df, HP.symbol, out_dir="reports")
+    with open("reports/trading_metrics_test.json", "w", encoding="utf-8") as f:
+        json.dump(trading_metrics, f, indent=2)
 
-    return {
-        "wf_mean": wf_mean,
-        "wf_std": wf_std,
-        "model": model,
-        "meta_model": meta_model,
-        "scaler_main": scaler_main,
-        "scaler_meta": scaler_meta,
-        "feature_cols": feature_cols,
-        "meta_cols": meta_cols,
-        "test_X": test_X_s,
-        "test_Xm": test_Xm_s,
-        "test_index": test_X.index,
-    }
-
-
-def run_pipeline():
-    prices = get_prices()
-    data = get_features(prices)
-
-    labels_df = create_labels(data["close"], hyper_params["rolling"], markup=hyper_params["markup"], seed=SEED)
-    data = data.join(labels_df, how="inner")
-
-    # main model dùng label buy/sell thành công
-    data = data[data["labels"].isin([0, 1])].copy()
-
-    clusters = get_volatility_regime(data, hyper_params["n_clusters"], hyper_params["train_ratio"])
-    data = data.join(clusters, how="inner")
-
-    result = fit_final_models(data)
-    print(f"Walk-forward R2 mean={result['wf_mean']:.4f}, std={result['wf_std']:.4f}")
-
-    test_pred = pd.DataFrame(index=result["test_index"])
-    test_pred["close"] = data.loc[result["test_index"], "close"]
-    test_pred["labels"] = (result["model"].predict_proba(result["test_X"])[:, 1] >= 0.5).astype(float)
-    test_pred["meta_labels"] = (result["meta_model"].predict_proba(result["test_Xm"])[:, 1] >= 0.5).astype(float)
-
-    tester(
-        test_pred,
-        hyper_params["stop_loss"],
-        hyper_params["take_profit"],
-        hyper_params["forward"],
-        hyper_params["backward"],
-        hyper_params["markup"],
-        True,
-        hyper_params["symbol"],
-        tag="best_model",
-    )
+    save_feature_importance(model, main_features, HP.symbol, out_dir="reports", top_n=20)
 
     report = {
         "timeframe": "H1",
-        "wf_r2": result["wf_mean"],
-        "wf_std": result["wf_std"],
-        "train_ratio": hyper_params["train_ratio"],
-        "val_ratio": hyper_params["val_ratio"],
-        "wf_splits": hyper_params["wf_splits"],
-        "n_features_main": len(result["feature_cols"]),
-        "n_features_meta": len(result["meta_cols"]),
-        "main_model": {
-            "iterations": result["model"].get_best_iteration(),
-            "best_score": result["model"].get_best_score(),
+        "train_ratio": HP.train_ratio,
+        "val_ratio": HP.val_ratio,
+        "test_ratio": 1 - HP.train_ratio - HP.val_ratio,
+        "n_features_main": len(main_features),
+        "n_features_meta": len(meta_features),
+        "best_threshold": best_t,
+        "classification_metrics_test": metrics_cls,
+        "trading_metrics_test": trading_metrics,
+        "best_main_params": {
+            "depth": int(best_params["depth"]),
+            "learning_rate": float(best_params["learning_rate"]),
+            "l2_leaf_reg": float(best_params["l2_leaf_reg"]),
+            "iterations": int(best_params["iterations"]),
         },
-        "meta_model": {
-            "iterations": result["meta_model"].get_best_iteration(),
-            "best_score": result["meta_model"].get_best_score(),
-        },
+        "main_model": {"best_iteration": int(model.get_best_iteration()), "best_score": model.get_best_score()},
+        "meta_model": {"best_iteration": int(meta_model.get_best_iteration()), "best_score": meta_model.get_best_score()},
+        "train_period": {"start": str(train_X.index.min()), "end": str(train_X.index.max())},
+        "val_period": {"start": str(val_X.index.min()), "end": str(val_X.index.max())},
+        "test_period": {"start": str(test_X.index.min()), "end": str(test_X.index.max())},
+        "seed": SEED,
     }
 
     exported = export_artifacts(
-        hyper_params["symbol"],
-        hyper_params["model_number"],
-        hyper_params["export_path"],
-        result["model"],
-        result["meta_model"],
-        result["scaler_main"],
-        result["scaler_meta"],
-        report,
-        hyper_params["periods"],
-        hyper_params["periods_meta"],
+        symbol=HP.symbol,
+        model_number=HP.model_number,
+        export_path=HP.export_path,
+        model=model,
+        meta_model=meta_model,
+        scaler_main=scaler_main,
+        scaler_meta=scaler_meta,
+        report=report,
+        periods=list(HP.periods),
+        periods_meta=list(HP.periods_meta),
+        feature_names=main_features,
+        feature_names_meta=meta_features,
+        decision_threshold=best_t,
+        sample_main=test_X_s,
+        sample_meta=test_Xm_s,
     )
-    print("Exported:")
-    for k, v in exported.items():
-        print(f"  {k}: {v}")
+
+    with open("reports/run_summary.json", "w", encoding="utf-8") as f:
+        json.dump({"exported": exported, "report": report}, f, indent=2)
+
+    print("Training complete")
+    print(json.dumps({"classification": metrics_cls, "trading": trading_metrics}, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["train", "search"], default="train")
+    parser.add_argument("--synthetic", action="store_true", help="Use synthetic data when files/XAUUSD_H1.csv is missing")
+    args = parser.parse_args()
+
+    train_pipeline(use_synthetic_if_missing=args.synthetic, run_search=args.mode == "search")
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()

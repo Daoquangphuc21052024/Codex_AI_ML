@@ -1,103 +1,184 @@
 from __future__ import annotations
 
-import os
-from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 
-def _calc_r2(y: list[float]) -> float:
-    if len(y) < 3:
-        return float("nan")
-    x = np.arange(len(y), dtype=float)
-    y_arr = np.asarray(y, dtype=float)
-    coef = np.polyfit(x, y_arr, 1)
-    pred = np.poly1d(coef)(x)
-    ss_res = np.sum((y_arr - pred) ** 2)
-    ss_tot = np.sum((y_arr - np.mean(y_arr)) ** 2)
-    if ss_tot == 0:
-        return float("nan")
-    return float(1 - ss_res / ss_tot)
+def _drawdown(equity: pd.Series) -> pd.Series:
+    peak = equity.cummax()
+    return equity - peak
 
 
-def _save_report_png(equity_curve, symbol, trades, r2, backward, forward, tag=""):
-    os.makedirs("reports", exist_ok=True)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    eq = np.asarray(equity_curve)
-    ax1.plot(eq, color="#1f77b4", lw=1.5, label="Equity")
-    ideal = np.poly1d(np.polyfit(range(len(eq)), eq, 1))(range(len(eq)))
-    ax1.plot(ideal, "--", color="#ff7f0e", lw=1.5, label="Ideal line")
-    ax1.fill_between(range(len(eq)), eq, 0, where=eq >= 0, alpha=0.15, color="green")
-    ax1.fill_between(range(len(eq)), eq, 0, where=eq < 0, alpha=0.15, color="red")
-    ax1.set_title(f"Equity Curve | Trades: {trades} | R²: {r2:.4f}")
-    ax1.legend()
-
-    diffs = np.diff(eq)
-    diffs = diffs[diffs != 0]
-    pos, neg = diffs[diffs > 0], diffs[diffs < 0]
-    if len(pos) > 0:
-        ax2.hist(pos, bins=max(1, min(30, len(np.unique(pos)))), color="green", alpha=0.6, label=f"Win ({len(pos)})")
-    if len(neg) > 0:
-        ax2.hist(neg, bins=max(1, min(30, len(np.unique(neg)))), color="red", alpha=0.6, label=f"Loss ({len(neg)})")
-    win_rate = len(pos) / len(diffs) * 100 if len(diffs) > 0 else 0
-    ax2.set_title(f"Trade Distribution | Win rate: {win_rate:.1f}%")
-    ax2.legend(loc="best")
-
-    plt.suptitle(f"{symbol} | {backward.date()} → {forward.date()}")
-    fname = f"reports/{symbol}_{tag}_{datetime.now():%Y%m%d_%H%M}.png"
-    plt.savefig(fname, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved → {fname}")
-    return fname
+def _profit_factor(pnl: pd.Series) -> float:
+    gross_profit = pnl[pnl > 0].sum()
+    gross_loss = -pnl[pnl < 0].sum()
+    if gross_loss == 0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return float(gross_profit / gross_loss)
 
 
-def tester(dataset: pd.DataFrame, stop: float, take: float, forward, backward, markup: float, plt_show: bool, symbol: str, tag: str = "") -> float:
-    df = dataset[(dataset.index >= backward) & (dataset.index <= forward)].copy()
-    if df.empty:
-        return float("nan")
+def backtest_signals(
+    dataset: pd.DataFrame,
+    stop: float,
+    take: float,
+    markup: float,
+    max_hold: int = 120,
+    signal_shift: int = 1,
+) -> tuple[pd.DataFrame, dict]:
+    df = dataset.copy()
+    required = {"close", "labels", "meta_labels"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"Missing required columns: {required - set(df.columns)}")
 
-    equity = 0.0
-    equity_curve = [0.0]
-    trades = 0
+    signal = df["labels"].shift(signal_shift)
+    confirm = df["meta_labels"].shift(signal_shift)
 
-    for i in range(len(df) - 1):
-        if df["meta_labels"].iloc[i] != 1.0:
-            equity_curve.append(equity)
+    trades = []
+    close_vals = df["close"].to_numpy()
+    idx = df.index
+
+    for i in range(signal_shift, len(df) - 2):
+        if confirm.iloc[i] != 1.0:
+            continue
+        side = int(signal.iloc[i]) if pd.notna(signal.iloc[i]) else None
+        if side not in (0, 1):
             continue
 
-        signal = df["labels"].iloc[i]
-        entry = df["close"].iloc[i]
-        traded = False
+        entry = close_vals[i]
+        exit_idx = None
+        pnl = 0.0
+        exit_reason = "timeout"
 
-        for j in range(i + 1, min(i + 200, len(df))):
-            price = df["close"].iloc[j]
-            if signal == 0.0:
+        for j in range(i + 1, min(i + 1 + max_hold, len(df))):
+            price = close_vals[j]
+            if side == 0:
                 if price - entry - markup >= take:
-                    equity += take - markup
-                    traded = True
+                    pnl = take - markup
+                    exit_idx = j
+                    exit_reason = "tp"
                     break
                 if entry - price + markup >= stop:
-                    equity -= stop + markup
-                    traded = True
+                    pnl = -(stop + markup)
+                    exit_idx = j
+                    exit_reason = "sl"
                     break
             else:
                 if entry - price - markup >= take:
-                    equity += take - markup
-                    traded = True
+                    pnl = take - markup
+                    exit_idx = j
+                    exit_reason = "tp"
                     break
                 if price - entry + markup >= stop:
-                    equity -= stop + markup
-                    traded = True
+                    pnl = -(stop + markup)
+                    exit_idx = j
+                    exit_reason = "sl"
                     break
 
-        if traded:
-            trades += 1
-        equity_curve.append(equity)
+        if exit_idx is None:
+            exit_idx = min(i + max_hold, len(df) - 1)
+            pnl = (close_vals[exit_idx] - entry) - markup if side == 0 else (entry - close_vals[exit_idx]) - markup
 
-    r2 = _calc_r2(equity_curve)
-    if plt_show:
-        _save_report_png(equity_curve, symbol, trades, r2, backward, forward, tag)
-    return r2
+        trades.append(
+            {
+                "entry_time": idx[i],
+                "exit_time": idx[exit_idx],
+                "side": "buy" if side == 0 else "sell",
+                "entry": float(entry),
+                "exit": float(close_vals[exit_idx]),
+                "bars_held": int(exit_idx - i),
+                "pnl": float(pnl),
+                "exit_reason": exit_reason,
+            }
+        )
+
+    trades_df = pd.DataFrame(trades)
+    if trades_df.empty:
+        metrics = {
+            "trades": 0,
+            "win_rate": 0.0,
+            "avg_trade": 0.0,
+            "profit_factor": 0.0,
+            "expectancy": 0.0,
+            "pnl": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe_like": 0.0,
+            "sortino_like": 0.0,
+            "long_trades": 0,
+            "short_trades": 0,
+        }
+        return trades_df, metrics
+
+    trades_df["cum_pnl"] = trades_df["pnl"].cumsum()
+    dd = _drawdown(trades_df["cum_pnl"])
+    r = trades_df["pnl"]
+    downside = r[r < 0]
+
+    metrics = {
+        "trades": int(len(trades_df)),
+        "win_rate": float((trades_df["pnl"] > 0).mean()),
+        "avg_trade": float(trades_df["pnl"].mean()),
+        "profit_factor": _profit_factor(trades_df["pnl"]),
+        "expectancy": float(trades_df["pnl"].mean()),
+        "pnl": float(trades_df["pnl"].sum()),
+        "max_drawdown": float(dd.min()),
+        "sharpe_like": float(r.mean() / (r.std() + 1e-12)),
+        "sortino_like": float(r.mean() / (downside.std() + 1e-12)) if len(downside) else 0.0,
+        "long_trades": int((trades_df["side"] == "buy").sum()),
+        "short_trades": int((trades_df["side"] == "sell").sum()),
+    }
+    return trades_df, metrics
+
+
+def save_backtest_reports(trades_df: pd.DataFrame, symbol: str, out_dir: str = "reports") -> dict[str, str]:
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    if trades_df.empty:
+        return {}
+
+    paths: dict[str, str] = {}
+    eq = trades_df["cum_pnl"].to_numpy()
+    dd = _drawdown(trades_df["cum_pnl"])
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(trades_df["exit_time"], eq, color="#1f77b4")
+    ax.set_title(f"{symbol} Equity Curve")
+    p = f"{out_dir}/{symbol}_equity_curve.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    paths["equity_png"] = p
+
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.fill_between(trades_df["exit_time"], dd.to_numpy(), 0, color="#d62728", alpha=0.4)
+    ax.set_title(f"{symbol} Drawdown")
+    p = f"{out_dir}/{symbol}_drawdown_curve.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    paths["drawdown_png"] = p
+
+    rolling_win = (trades_df["pnl"] > 0).rolling(30, min_periods=5).mean()
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.plot(trades_df["exit_time"], rolling_win, color="#2ca02c")
+    ax.set_ylim(0, 1)
+    ax.set_title(f"{symbol} Rolling Win Rate (30)")
+    p = f"{out_dir}/{symbol}_rolling_winrate.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    paths["rolling_winrate_png"] = p
+
+    rolling_pnl = trades_df["pnl"].rolling(30, min_periods=5).sum()
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.plot(trades_df["exit_time"], rolling_pnl, color="#9467bd")
+    ax.set_title(f"{symbol} Rolling PnL (30)")
+    p = f"{out_dir}/{symbol}_rolling_pnl.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    paths["rolling_pnl_png"] = p
+
+    trades_df.to_csv(f"{out_dir}/{symbol}_trade_log.csv", index=False)
+    monthly = trades_df.set_index("exit_time")["pnl"].resample("M").agg(["sum", "count", "mean"])
+    monthly.to_csv(f"{out_dir}/{symbol}_monthly_summary.csv")
+    paths["trade_log_csv"] = f"{out_dir}/{symbol}_trade_log.csv"
+    paths["monthly_summary_csv"] = f"{out_dir}/{symbol}_monthly_summary.csv"
+    return paths
