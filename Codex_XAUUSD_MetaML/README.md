@@ -33,3 +33,8 @@ python trend_following.py
 ```
 
 CSV đầu vào mặc định: `files/XAUUSD_H1.csv`.
+
+
+## Hướng dẫn chi tiết
+
+Xem file: `HUONG_DAN_CHAY_PIPELINE.md`
