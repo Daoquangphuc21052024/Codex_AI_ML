@@ -66,10 +66,17 @@ def export_artifacts(
     with open(feature_meta_path, "w", encoding="utf-8") as f:
         json.dump(feature_names_meta, f, ensure_ascii=False, indent=2)
 
+    n_features_main = report.get("n_features_main")
+    n_features_meta = report.get("n_features_meta")
+    if n_features_main is None:
+        n_features_main = report.get("feature_counts", {}).get("selected", len(feature_names))
+    if n_features_meta is None:
+        n_features_meta = report.get("feature_counts", {}).get("selected", len(feature_names_meta))
+
     mqh = f'''#define MODEL_MAIN_PATH   "{os.path.basename(main_onnx)}"
 #define MODEL_META_PATH   "{os.path.basename(meta_onnx)}"
-#define N_FEATURES        {report["n_features_main"]}
-#define N_FEATURES_META   {report["n_features_meta"]}
+#define N_FEATURES        {int(n_features_main)}
+#define N_FEATURES_META   {int(n_features_meta)}
 #define N_PERIODS         {len(periods)}
 #define N_PERIODS_META    {len(periods_meta)}
 #define DECISION_THRESHOLD {decision_threshold:.6f}

@@ -308,6 +308,8 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     save_feature_importance(model_sell, selected, HP.symbol, out_dir="reports", top_n=20, tag="_sell", feature_groups=feature_groups)
 
     summary = {
+        "n_features_main": len(selected),
+        "n_features_meta": len(selected),
         "configuration": {
             "symbol": HP.symbol,
             "train_ratio": HP.train_ratio,
