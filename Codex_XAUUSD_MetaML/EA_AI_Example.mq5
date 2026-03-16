@@ -3,66 +3,53 @@
 #include <Trade/Trade.mqh>
 #include "AI_ModelInference.mqh"
 
-// ============================================================
+// ============================================================================
 // EA_AI_Example.mq5
-// Example EA:
-// - computes features on closed H1 bar
-// - runs ONNX buy/sell models
-// - uses delta-edge action model
-// - can run in SAFE mode (no orders)
-// ============================================================
+// Safe deployment harness:
+// - Default: inference-only logging (no trades)
+// - Runs on H1 closed bar to match Python signal timing
+// ============================================================================
 
-input bool   InpSafeInferenceOnly = true;
-input double InpLotSize           = 0.10;
-input int    InpSLPoints          = 600;
-input int    InpTPPoints          = 600;
+input bool   InpDryRunOnly = true;
+input string InpBuyModelPath  = "XAUUSD_H1_model_0.onnx";
+input string InpSellModelPath = "XAUUSD_H1_meta_0.onnx";
 
-CTrade g_trade;
-AIInferenceContext g_ai;
-datetime g_lastBarTime = 0;
+input double InpLot = 0.10;
+input int    InpSLPoints = 600;
+input int    InpTPPoints = 600;
 
-bool IsNewClosedBar()
+CTrade      g_trade;
+MI_Context  g_ctx;
+datetime    g_last_closed_bar = 0;
+
+bool EA_IsNewClosedH1Bar()
 {
-   MqlRates rates[];
-   int got = CopyRates(_Symbol, PERIOD_H1, 0, 3, rates);
-   if(got < 3)
+   MqlRates r[];
+   if(CopyRates(_Symbol, PERIOD_H1, 0, 3, r) < 3)
       return false;
-
-   ArraySetAsSeries(rates, true);
-   datetime lastClosedBar = rates[1].time;
-   if(lastClosedBar != g_lastBarTime)
+   ArraySetAsSeries(r, true);
+   datetime t = r[1].time;
+   if(t != g_last_closed_bar)
    {
-      g_lastBarTime = lastClosedBar;
+      g_last_closed_bar = t;
       return true;
    }
    return false;
 }
 
-bool HasPositionOnSymbol()
+bool EA_HasOpenPos()
 {
-   if(!PositionSelect(_Symbol))
-      return false;
-   return true;
+   return PositionSelect(_Symbol);
 }
 
-void LogDecision(const double prob_buy,
-                 const double prob_sell,
-                 const double delta,
-                 const int action)
-{
-   string a = (action == 0 ? "BUY" : (action == 1 ? "SELL" : "NO_TRADE"));
-   PrintFormat("AI decision | prob_buy=%.6f prob_sell=%.6f delta=%.6f action=%s",
-               prob_buy, prob_sell, delta, a);
-}
-
-bool PlaceOrder(const int action)
+bool EA_Send(const int action)
 {
    if(action == -1)
       return true;
 
-   if(HasPositionOnSymbol())
+   if(EA_HasOpenPos())
    {
-      Print("Skip: position already exists on symbol");
+      Print("Skip order: existing position on symbol");
       return true;
    }
 
@@ -73,72 +60,72 @@ bool PlaceOrder(const int action)
    {
       double sl = ask - InpSLPoints * _Point;
       double tp = ask + InpTPPoints * _Point;
-      return g_trade.Buy(InpLotSize, _Symbol, ask, sl, tp, "AI BUY");
+      return g_trade.Buy(InpLot, _Symbol, ask, sl, tp, "AI_BUY");
    }
    else
    {
       double sl = bid + InpSLPoints * _Point;
       double tp = bid - InpTPPoints * _Point;
-      return g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "AI SELL");
+      return g_trade.Sell(InpLot, _Symbol, bid, sl, tp, "AI_SELL");
    }
 }
 
 int OnInit()
 {
-   if(!AI_Init(g_ai))
-   {
-      Print("AI init failed");
-      return(INIT_FAILED);
-   }
+   FP_ResetConfig();
 
-   Print("EA_AI_Example initialized");
-   return(INIT_SUCCEEDED);
+   // -----------------------------------------------------------------
+   // REQUIRED: paste exact export config from Python report json
+   // Example only (replace with real selected features + scaler values)
+   // -----------------------------------------------------------------
+   FP_SetFeatureCount(4);
+   FP_SetFeatureDef(0, "roc_3", 0.0, 1.0);
+   FP_SetFeatureDef(1, "atr_14", 0.0, 1.0);
+   FP_SetFeatureDef(2, "bull_regime_score", 0.0, 1.0);
+   FP_SetFeatureDef(3, "bear_regime_score", 0.0, 1.0);
+
+   g_fp_cfg.buy_edge_threshold  = 0.08;
+   g_fp_cfg.sell_edge_threshold = 0.08;
+   g_fp_cfg.edge_margin         = 0.55;
+   g_fp_cfg.entry_mode          = "next_open";
+   g_fp_cfg.signal_shift        = 0;
+   g_fp_cfg.barrier_type        = "atr";
+   g_fp_cfg.same_bar_conflict   = "sl_first";
+   g_fp_cfg.max_hold            = 12;
+
+   if(!MI_Load(InpBuyModelPath, InpSellModelPath, g_ctx))
+      return INIT_FAILED;
+
+   Print("EA initialized. DryRunOnly=", InpDryRunOnly);
+   return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
-   AI_Shutdown(g_ai);
+   MI_Close(g_ctx);
 }
 
 void OnTick()
 {
-   if(!IsNewClosedBar())
+   if(!EA_IsNewClosedH1Bar())
       return;
 
-   // shift=1 => last fully closed bar
-   double feat[];
-   if(!FP_BuildModelInput(1, feat))
+   double prob_buy=0.0, prob_sell=0.0, delta=0.0;
+   int action=-1;
+
+   // shift=1 => last closed bar, matching Python decision timing
+   if(!MI_Infer(g_ctx, 1, prob_buy, prob_sell, delta, action))
    {
-      Print("Feature pipeline failed (insufficient bars / invalid feature)");
+      Print("MI_Infer failed. Check feature parity / scaler / model outputs.");
       return;
    }
 
-   double prob_buy = 0.0, prob_sell = 0.0, delta = 0.0;
-   if(!AI_Predict(g_ai, feat, prob_buy, prob_sell, delta))
-   {
-      Print("Inference failed");
-      return;
-   }
+   string act = (action==0?"BUY":(action==1?"SELL":"NO_TRADE"));
+   PrintFormat("AI | buy=%.6f sell=%.6f delta=%.6f action=%s", prob_buy, prob_sell, delta, act);
 
-   double buy_thr = InpBuyEdgeThreshold;
-   double sell_thr = InpSellEdgeThreshold;
-
-   // Optional regime adjust (must match Python config)
-   if(InpUseRegimeAdjust)
-   {
-      // proxy regime from features[10]=bull_score, [11]=bear_score in this template
-      double bull = feat[10];
-      double bear = feat[11];
-      buy_thr  = MathMax(0.02, MathMin(0.60, buy_thr  + InpRegimeDelta * (bear - bull)));
-      sell_thr = MathMax(0.02, MathMin(0.60, sell_thr + InpRegimeDelta * (bull - bear)));
-   }
-
-   int action = FP_DecideAction(prob_buy, prob_sell, buy_thr, sell_thr, InpEdgeMargin);
-   LogDecision(prob_buy, prob_sell, delta, action);
-
-   if(InpSafeInferenceOnly)
+   if(InpDryRunOnly)
       return;
 
-   if(!PlaceOrder(action))
-      Print("Order send failed. err=", GetLastError());
+   if(!EA_Send(action))
+      Print("Order failed err=", GetLastError());
 }
