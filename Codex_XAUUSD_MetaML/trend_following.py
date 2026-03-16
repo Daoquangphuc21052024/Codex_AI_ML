@@ -153,20 +153,13 @@ def _threshold_search(
     prob_sell: np.ndarray,
 ) -> tuple[dict, pd.DataFrame]:
     rows = []
-    buy_grid = [round(x, 3) for x in np.arange(0.48, 0.69, 0.02)]
-    sell_grid = [round(x, 3) for x in np.arange(0.48, 0.69, 0.02)]
-    margin_grid = [round(x, 3) for x in np.arange(0.00, 0.11, 0.02)]
+    buy_grid = [round(x, 3) for x in np.arange(0.02, 0.31, 0.03)]
+    sell_grid = [round(x, 3) for x in np.arange(0.02, 0.31, 0.03)]
+    margin_grid = [round(x, 3) for x in np.arange(0.45, 0.71, 0.05)]
 
-    for buy_t in buy_grid:
-        for sell_t in sell_grid:
+    for buy_edge_t in buy_grid:
+        for sell_edge_t in sell_grid:
             for edge_margin in margin_grid:
-                dyn_buy_t, dyn_sell_t = _regime_thresholds(
-                    base_buy=buy_t,
-                    base_sell=sell_t,
-                    regime_bull=val_df.get("bull_regime_score", pd.Series(0.5, index=val_df.index)),
-                    regime_bear=val_df.get("bear_regime_score", pd.Series(0.5, index=val_df.index)),
-                )
-
                 ds = pd.DataFrame(
                     {
                         "open": val_df["open"],
@@ -184,8 +177,8 @@ def _threshold_search(
                     stop=HP.stop_loss,
                     take=HP.take_profit,
                     markup=0.0,
-                    buy_threshold=dyn_buy_t,
-                    sell_threshold=dyn_sell_t,
+                    buy_threshold=buy_edge_t,
+                    sell_threshold=sell_edge_t,
                     edge_margin=edge_margin,
                     max_hold=HP.label_max_hold,
                     signal_shift=0,
@@ -221,10 +214,12 @@ def _threshold_search(
 
                 rows.append(
                     {
-                        "buy_threshold": buy_t,
-                        "sell_threshold": sell_t,
-                        "buy_threshold_effective_mean": float(np.mean(dyn_buy_t)),
-                        "sell_threshold_effective_mean": float(np.mean(dyn_sell_t)),
+                        "buy_edge_threshold": buy_edge_t,
+                        "sell_edge_threshold": sell_edge_t,
+                        "buy_threshold": buy_edge_t,
+                        "sell_threshold": sell_edge_t,
+                        "buy_threshold_effective_mean": float(buy_edge_t),
+                        "sell_threshold_effective_mean": float(sell_edge_t),
                         "edge_margin": edge_margin,
                         "score": score,
                         "hard_fail": int(hard_fail),
@@ -239,9 +234,61 @@ def _threshold_search(
     return valid.iloc[0].to_dict(), table
 
 
+
+
+def _verify_label_tester_alignment(report_path: str = "reports/label_tester_alignment_check.json") -> dict:
+    check = {
+        "label_entry_mode": HP.label_entry_mode,
+        "tester_entry_mode": HP.label_entry_mode,
+        "signal_shift": 0,
+        "label_barrier_type": "atr",
+        "tester_barrier_type": "atr",
+        "label_tp_buy_atr": HP.label_tp_buy_atr,
+        "tester_tp_buy_atr": HP.label_tp_buy_atr,
+        "label_sl_buy_atr": HP.label_sl_buy_atr,
+        "tester_sl_buy_atr": HP.label_sl_buy_atr,
+        "label_tp_sell_atr": HP.label_tp_sell_atr,
+        "tester_tp_sell_atr": HP.label_tp_sell_atr,
+        "label_sl_sell_atr": HP.label_sl_sell_atr,
+        "tester_sl_sell_atr": HP.label_sl_sell_atr,
+        "label_max_hold": HP.label_max_hold,
+        "tester_max_hold": HP.label_max_hold,
+        "label_same_bar_conflict": HP.label_same_bar_conflict,
+        "tester_same_bar_conflict": HP.label_same_bar_conflict,
+    }
+    mismatches: dict[str, dict] = {}
+
+    def _cmp(name: str, a, b):
+        if a != b:
+            mismatches[name] = {"label": a, "tester": b}
+
+    _cmp("entry_mode", check["label_entry_mode"], check["tester_entry_mode"])
+    if check["signal_shift"] != 0:
+        mismatches["signal_shift"] = {"expected": 0, "actual": check["signal_shift"]}
+    _cmp("barrier_type", check["label_barrier_type"], check["tester_barrier_type"])
+    _cmp("tp_buy_atr", check["label_tp_buy_atr"], check["tester_tp_buy_atr"])
+    _cmp("sl_buy_atr", check["label_sl_buy_atr"], check["tester_sl_buy_atr"])
+    _cmp("tp_sell_atr", check["label_tp_sell_atr"], check["tester_tp_sell_atr"])
+    _cmp("sl_sell_atr", check["label_sl_sell_atr"], check["tester_sl_sell_atr"])
+    _cmp("max_hold", check["label_max_hold"], check["tester_max_hold"])
+    _cmp("same_bar_conflict", check["label_same_bar_conflict"], check["tester_same_bar_conflict"])
+
+    payload = {"alignment_ok": not mismatches, "mismatches": mismatches, **check}
+    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    if mismatches:
+        lines = ["LABEL / BACKTEST MISALIGNMENT DETECTED"]
+        for k, v in mismatches.items():
+            lines.append(f"{k}: {v}")
+        raise RuntimeError("\n".join(lines))
+    return payload
+
 def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = False, disable_meta: bool = True):
     Path("reports").mkdir(parents=True, exist_ok=True)
     Path(HP.export_path).mkdir(parents=True, exist_ok=True)
+    alignment_check = _verify_label_tester_alignment("reports/label_tester_alignment_check.json")
 
     data, main_features, feature_groups = _build_dataset(use_synthetic_if_missing=use_synthetic_if_missing)
     evaluate_label_quality(data, out_dir="reports")
@@ -327,27 +374,20 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     thr_table.to_csv("reports/threshold_search_dual.csv", index=False)
     thr_table.head(60).to_csv("reports/threshold_candidates_side_by_side.csv", index=False)
 
-    buy_t = float(best_thr["buy_threshold"])
-    sell_t = float(best_thr["sell_threshold"])
+    buy_t = float(best_thr.get("buy_edge_threshold", best_thr["buy_threshold"]))
+    sell_t = float(best_thr.get("sell_edge_threshold", best_thr["sell_threshold"]))
     edge_margin = float(best_thr["edge_margin"])
 
     test_prob_buy = model_buy.predict_proba(teX_s)[:, 1]
     test_prob_sell = model_sell.predict_proba(teX_s)[:, 1]
 
-    dual_cls = evaluate_dual_classification(te_buy, te_sell, test_prob_buy, test_prob_sell, buy_t, sell_t)
+    dual_cls = evaluate_dual_classification(te_buy, te_sell, test_prob_buy, test_prob_sell, buy_t, sell_t, edge_margin=edge_margin)
     print(
         f"Per-side AUC/PR-AUC | buy: {dual_cls['auc_buy']:.4f}/{dual_cls['pr_auc_buy']:.4f} | "
         f"sell: {dual_cls['auc_sell']:.4f}/{dual_cls['pr_auc_sell']:.4f}"
     )
 
-    test_buy_thr, test_sell_thr = _regime_thresholds(
-        buy_t,
-        sell_t,
-        regime_bull=data.loc[teX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=teX.index),
-        regime_bear=data.loc[teX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=teX.index),
-    )
-
-    actions = resolve_actions(test_prob_buy, test_prob_sell, test_buy_thr, test_sell_thr, edge_margin)
+    actions = resolve_actions(test_prob_buy, test_prob_sell, buy_t, sell_t, edge_margin)
     act_diag = action_semantic_diagnostics(actions, te_buy, te_sell)
 
     def _run_backtest_for_split(split_name: str, idx: pd.Index, prob_buy: np.ndarray, prob_sell: np.ndarray, buy_thr, sell_thr):
@@ -387,22 +427,9 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
     val_prob_buy_bt = model_buy.predict_proba(vaX_s)[:, 1]
     val_prob_sell_bt = model_sell.predict_proba(vaX_s)[:, 1]
 
-    train_buy_thr, train_sell_thr = _regime_thresholds(
-        buy_t,
-        sell_t,
-        regime_bull=data.loc[trX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=trX.index),
-        regime_bear=data.loc[trX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=trX.index),
-    )
-    val_buy_thr, val_sell_thr = _regime_thresholds(
-        buy_t,
-        sell_t,
-        regime_bull=data.loc[vaX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=vaX.index),
-        regime_bear=data.loc[vaX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=vaX.index),
-    )
-
-    train_trades_df, train_trading_metrics = _run_backtest_for_split("train", trX.index, train_prob_buy, train_prob_sell, train_buy_thr, train_sell_thr)
-    val_trades_df, val_trading_metrics = _run_backtest_for_split("val", vaX.index, val_prob_buy_bt, val_prob_sell_bt, val_buy_thr, val_sell_thr)
-    trades_df, trading_metrics = _run_backtest_for_split("test", teX.index, test_prob_buy, test_prob_sell, test_buy_thr, test_sell_thr)
+    train_trades_df, train_trading_metrics = _run_backtest_for_split("train", trX.index, train_prob_buy, train_prob_sell, buy_t, sell_t)
+    val_trades_df, val_trading_metrics = _run_backtest_for_split("val", vaX.index, val_prob_buy_bt, val_prob_sell_bt, buy_t, sell_t)
+    trades_df, trading_metrics = _run_backtest_for_split("test", teX.index, test_prob_buy, test_prob_sell, buy_t, sell_t)
 
     split_markers = {
         "train_start": trX.index.min(),
@@ -537,6 +564,7 @@ def train_pipeline(use_synthetic_if_missing: bool = False, run_search: bool = Fa
             "top_candidates": thr_table.head(20).to_dict(orient="records"),
         },
         "label_tester_alignment": rr_alignment,
+        "label_tester_alignment_check": alignment_check,
         "alignment_report": alignment_report,
         "model_best_iterations": {
             "buy": int(model_buy.get_best_iteration()),
@@ -675,6 +703,7 @@ def run_walkforward(
 ):
     wf_root = Path("reports/walkforward")
     wf_root.mkdir(parents=True, exist_ok=True)
+    _verify_label_tester_alignment(str(wf_root / "label_tester_alignment_check.json"))
 
     data, main_features, feature_groups = _build_dataset(use_synthetic_if_missing=use_synthetic_if_missing)
     X_all = data[main_features]
@@ -762,25 +791,19 @@ def run_walkforward(
             best_thr, thr_table = _threshold_search(val_df, val_prob_buy, val_prob_sell)
             thr_table.to_csv(fold_dir / "threshold_candidates.csv", index=False)
 
-            buy_t = float(best_thr["buy_threshold"])
-            sell_t = float(best_thr["sell_threshold"])
+            buy_t = float(best_thr.get("buy_edge_threshold", best_thr["buy_threshold"]))
+            sell_t = float(best_thr.get("sell_edge_threshold", best_thr["sell_threshold"]))
             edge_margin = float(best_thr["edge_margin"])
 
             test_prob_buy = model_buy.predict_proba(teX_s)[:, 1]
             test_prob_sell = model_sell.predict_proba(teX_s)[:, 1]
-            dual_cls = evaluate_dual_classification(te_buy, te_sell, test_prob_buy, test_prob_sell, buy_t, sell_t)
+            dual_cls = evaluate_dual_classification(te_buy, te_sell, test_prob_buy, test_prob_sell, buy_t, sell_t, edge_margin=edge_margin)
 
-            dyn_buy_t, dyn_sell_t = _regime_thresholds(
-                buy_t,
-                sell_t,
-                regime_bull=data.loc[teX.index, "bull_regime_score"] if "bull_regime_score" in data.columns else pd.Series(0.5, index=teX.index),
-                regime_bear=data.loc[teX.index, "bear_regime_score"] if "bear_regime_score" in data.columns else pd.Series(0.5, index=teX.index),
-            )
             test_ds = data.loc[teX.index, ["open", "high", "low", "close"]].copy()
             test_ds["spread"] = data.loc[teX.index, "spread"] if "spread" in data.columns else 0.0
             test_ds["prob_buy"] = test_prob_buy
             test_ds["prob_sell"] = test_prob_sell
-            trades_df, trading_metrics = _run_backtest_split(test_ds, dyn_buy_t, dyn_sell_t, edge_margin)
+            trades_df, trading_metrics = _run_backtest_split(test_ds, buy_t, sell_t, edge_margin)
 
             split_markers = {
                 "train_start": trX.index.min(),

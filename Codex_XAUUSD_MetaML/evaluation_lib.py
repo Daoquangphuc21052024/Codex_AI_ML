@@ -52,9 +52,13 @@ def evaluate_dual_classification(
     prob_sell: np.ndarray,
     buy_threshold: float,
     sell_threshold: float,
+    edge_margin: float = 0.0,
 ) -> dict:
-    pred_buy = (prob_buy >= buy_threshold).astype(int)
-    pred_sell = (prob_sell >= sell_threshold).astype(int)
+    delta = prob_buy - prob_sell
+    pred_buy = ((delta > buy_threshold) & (prob_buy >= edge_margin)).astype(int)
+    pred_sell = ((delta < -sell_threshold) & (prob_sell >= edge_margin)).astype(int)
+    idx_buy_actions = pred_buy == 1
+    idx_sell_actions = pred_sell == 1
 
     return {
         "auc_buy": _safe_auc(y_buy, prob_buy),
@@ -71,6 +75,12 @@ def evaluate_dual_classification(
         "f1_sell": float(f1_score(y_sell, pred_sell, zero_division=0)),
         "predicted_positive_rate_buy": float(pred_buy.mean()),
         "predicted_positive_rate_sell": float(pred_sell.mean()),
+        "delta_mean": float(np.mean(delta)),
+        "delta_std": float(np.std(delta, ddof=0)),
+        "delta_positive_rate": float(np.mean(delta > 0)),
+        "delta_negative_rate": float(np.mean(delta < 0)),
+        "avg_delta_buy_trades": float(delta[idx_buy_actions].mean()) if np.any(idx_buy_actions) else 0.0,
+        "avg_delta_sell_trades": float(delta[idx_sell_actions].mean()) if np.any(idx_sell_actions) else 0.0,
         "confusion_buy": confusion_matrix(y_buy, pred_buy, labels=[0, 1]).tolist(),
         "confusion_sell": confusion_matrix(y_sell, pred_sell, labels=[0, 1]).tolist(),
         "buy_prob_mean_when_positive": float(prob_buy[y_buy.to_numpy() == 1].mean()) if (y_buy == 1).any() else 0.0,
@@ -81,6 +91,7 @@ def evaluate_dual_classification(
         "calibration_sell": _calibration_points(y_sell, prob_sell),
         "buy_threshold": float(buy_threshold),
         "sell_threshold": float(sell_threshold),
+        "edge_margin": float(edge_margin),
     }
 
 

@@ -38,14 +38,18 @@ def resolve_actions(
     else:
         sell_thr = np.asarray(sell_threshold, dtype=float)
 
-    buy_signal = (prob_buy >= buy_thr) & (prob_buy > prob_sell + edge_margin)
-    sell_signal = (prob_sell >= sell_thr) & (prob_sell > prob_buy + edge_margin)
+    delta = prob_buy - prob_sell
+    # Delta probability decision model:
+    # BUY  if delta > buy_edge_threshold and buy confidence passes optional filter
+    # SELL if delta < -sell_edge_threshold and sell confidence passes optional filter
+    buy_signal = (delta > buy_thr) & (prob_buy >= edge_margin)
+    sell_signal = (delta < -sell_thr) & (prob_sell >= edge_margin)
 
     action = np.full(prob_buy.shape[0], -1, dtype=np.int8)
     action[buy_signal] = 0
     action[sell_signal] = 1
 
-    conflict = (prob_buy >= buy_thr) & (prob_sell >= sell_thr) & (action == -1)
+    conflict = buy_signal & sell_signal
     if conflict.any() and conflict_mode == "stronger_edge":
         action[conflict & (prob_buy > prob_sell)] = 0
         action[conflict & (prob_sell > prob_buy)] = 1
