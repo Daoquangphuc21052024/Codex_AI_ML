@@ -290,3 +290,55 @@ Nếu pass toàn bộ mới cho phép execute.
 
 - Cấu hình input/preset: `EAMT5/README.MD`
 - Mã nguồn EA: `EAMT5/ICT_SMC_EA_V3_step1.mq5`
+
+---
+
+## 15) Cập nhật theo version hiện tại (latest)
+
+Phần này mô tả các nâng cấp mới nhất đã có trong code hiện tại:
+
+### 15.1) Quality filter cho structure (IMP-2)
+- `SETUP_SWEEP_CONFIRMED` không còn pass-through đơn thuần.
+- Setup chỉ chuyển sang `SETUP_SHIFT_CONFIRMED` khi đồng thời đạt:
+  1. **Type hợp lệ** theo input:
+     - `InpRequireCHoCH = true`: ưu tiên CHoCH
+     - `InpAllowBOSEntry = true`: cho phép BOS
+  2. **Momentum hợp lệ**:
+     - body nến break >= `ATR * InpStructMinBodyATR`
+     - có guard ATR <= 0 để tránh reject sai
+  3. **Đúng thứ tự thời gian narrative**:
+     - `breakBar < sweep.barIndex` (bar mới hơn có shift nhỏ hơn)
+- Có debug log chi tiết: type + body + ATR khi structure được xác nhận.
+
+### 15.2) Sweep lookback nhiều nến (IMP-3)
+- `DetectLiquiditySweep()` quét từ `shift=1..InpSweepLookbackBars` thay vì chỉ 1 nến.
+- `g_lastSweep.barIndex` lưu đúng shift tìm được (không hardcode = 1), phục vụ kiểm tra thứ tự với structure.
+
+### 15.3) Metadata break body trong `MarketStructure` (IMP-4)
+- Thêm trường `breakBodySize`.
+- Được gán ngay lúc detect break để dùng cho momentum filter ở state machine.
+
+### 15.4) Gate 2 (FVG entry) nâng cấp — IMP-G2
+- Thêm input:
+  - `InpAllowPendingBelowFVG`
+  - `InpMaxFVGDistanceATR`
+  - `InpRequireFVGEntryFromTop`
+- BUY/SELL xử lý đầy đủ 3 trạng thái giá so với FVG: inside / above / below.
+- Có guard khoảng cách theo ATR để tránh đặt pending quá xa vùng FVG.
+- Có tùy chọn yêu cầu hướng tiếp cận FVG (approach direction) trước khi market entry trong vùng.
+- SELL được mirror logic theo Bid và ràng buộc SellLimit.
+
+### 15.5) Gate 3 (OTE) nâng cấp — IMP-G3
+- Khi bật cả FVG + OTE:
+  - Tính vùng overlap `FVG ∩ OTE`.
+  - Nếu không overlap: log lý do và reject setup.
+  - Nếu có overlap: clamp `entryPrice` vào vùng giao nhau.
+  - Nếu là pending: re-check lại ràng buộc giá pending so với Bid/Ask.
+- Khi chỉ dùng OTE (không FVG): giữ check biên OTE như cũ.
+
+### 15.6) Các FIX runtime quan trọng đã có
+- `BarsSinceTime()` dùng `iBarShift(..., false)` để tránh timeout giả.
+- Có input `InpRequireHTFBias` để tránh bị khóa lệnh toàn bộ khi HTF = `BIAS_NONE`.
+- `CheckSessionFilter()` dùng GMT offset (`InpGMTOffset`) thay vì dùng broker time trực tiếp.
+- Có guard giá pending hợp lệ để tránh broker reject giá sai.
+- FVG chaining trong state machine dùng `barIndex` thay vì so sánh datetime dễ sai lệch.

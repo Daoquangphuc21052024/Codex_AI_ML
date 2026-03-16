@@ -530,6 +530,10 @@ void UpdateStrategyStateComment()
 //============================================================
 // INITIALIZATION
 //============================================================
+//+------------------------------------------------------------------+
+//| OnInit: khởi tạo EA, handle ATR, resize bộ nhớ và reset state.   |
+//| Logic quan trọng: nếu ATR handle lỗi -> INIT_FAILED để tránh chạy|
+//+------------------------------------------------------------------+
 int OnInit()
 {
    g_trade.SetExpertMagicNumber(InpMagicNumber);
@@ -637,6 +641,11 @@ void ResetContextToWaitSweep(SetupContext &ctx)
 //============================================================
 // MAIN
 //============================================================
+//+------------------------------------------------------------------+
+//| OnTick: vòng lặp runtime chính theo event-driven tick.           |
+//| Trình tự: quản trị lệnh -> cập nhật HTF -> xử lý nến mới signal  |
+//| -> detect engines -> state machine -> build/validate/execute.    |
+//+------------------------------------------------------------------+
 void OnTick()
 {
    g_symbol.RefreshRates();
@@ -697,6 +706,10 @@ void OnTick()
 // NOTE: Logic intentionally preserved. Only guard/refactor style changed.
 
 void DetectSwingPoints();
+//+------------------------------------------------------------------+
+//| DetectTierSwing: xác định pivot high/low cho internal/external.  |
+//| Pivot chỉ hợp lệ khi cao/thấp hơn cả phía trái và phải.          |
+//+------------------------------------------------------------------+
 void DetectTierSwing(int tier, int leftBars, int rightBars);
 bool SwingExists(SwingPoint &arr[], int count, datetime t, bool isHigh, int tier);
 void AddSwingToArray(SwingPoint &arr[], int &count, datetime t, double price, bool isHigh, int barIdx, int tier);
@@ -704,19 +717,52 @@ bool GetLastUnbrokenSwing(int tier, bool wantHigh, SwingPoint &out);
 bool GetLastTwoSwings(int tier, bool wantHigh, SwingPoint &latest, SwingPoint &previous);
 void MarkSwingBroken(int tier, datetime t, bool isHigh);
 int  DetermineInternalTrend();
+//+------------------------------------------------------------------+
+//| DetectMarketStructure: phát hiện break cấu trúc từ swing nội bộ. |
+//| BOS/CHoCH giữ nguyên logic gốc, chỉ thêm metadata break body.    |
+//+------------------------------------------------------------------+
 void DetectMarketStructure();
+//+------------------------------------------------------------------+
+//| DetectLiquiditySweep: quét thanh khoản SSL/BSL theo external.    |
+//| Duyệt nhiều bar (InpSweepLookbackBars), lấy sweep đầu tiên hợp lệ|
+//| để tránh overfit và giữ narrative theo thời gian gần nhất.       |
+//+------------------------------------------------------------------+
 void DetectLiquiditySweep();
 double GetATRValue(int shift);
+//+------------------------------------------------------------------+
+//| DetectDisplacement: nhận diện nến xung lực bằng ATR + body ratio.|
+//| Khi đạt điều kiện, BuildImpulseLeg để phục vụ FVG/OTE narrative. |
+//+------------------------------------------------------------------+
 void DetectDisplacement();
+//+------------------------------------------------------------------+
+//| BuildImpulseLeg: dựng đoạn impulse từ displacement hiện tại.     |
+//| BUY: min low -> max high; SELL: max high -> min low.             |
+//+------------------------------------------------------------------+
 void BuildImpulseLeg(DisplacementInfo &disp);
+//+------------------------------------------------------------------+
+//| DetectFVG: tìm khoảng trống giá 3 nến quanh displacement candle. |
+//| Kết quả tạo vùng retrace ưu tiên cho Gate 2 (entry resolution).  |
+//+------------------------------------------------------------------+
 void DetectFVG();
+//+------------------------------------------------------------------+
+//| CalculateOTEZone: dựng vùng OTE từ impulse leg theo fib levels.  |
+//| Gate 3 sẽ kiểm tra overlap/consistency giữa OTE và FVG nếu bật.  |
+//+------------------------------------------------------------------+
 void CalculateOTEZone();
+//+------------------------------------------------------------------+
+//| DetermineHTFBias: bias khung lớn từ cấu trúc HH/HL hoặc LH/LL.   |
+//| Bias dùng làm filter định hướng cho setup cuối cùng.             |
+//+------------------------------------------------------------------+
 void DetermineHTFBias();
 bool GetLastTwoSwingFromArray(SwingPoint &arr[], int count, bool wantHigh, SwingPoint &latest, SwingPoint &previous);
 
 // -- implementations copied/guarded
 void DetectSwingPoints(){ DetectTierSwing(SWING_INTERNAL, MathMax(1, InpSwingLeft / 2), MathMax(1, InpSwingRight / 2)); DetectTierSwing(SWING_EXTERNAL, InpSwingLeft, InpSwingRight); }
 
+//+------------------------------------------------------------------+
+//| DetectTierSwing: xác định pivot high/low cho internal/external.  |
+//| Pivot chỉ hợp lệ khi cao/thấp hơn cả phía trái và phải.          |
+//+------------------------------------------------------------------+
 void DetectTierSwing(int tier, int leftBars, int rightBars)
 {
    int pivotBar = MathMax(1, rightBars);
@@ -813,6 +859,10 @@ int DetermineInternalTrend()
    if(bullish) return 1; if(bearish) return -1; return 0;
 }
 
+//+------------------------------------------------------------------+
+//| DetectMarketStructure: phát hiện break cấu trúc từ swing nội bộ. |
+//| BOS/CHoCH giữ nguyên logic gốc, chỉ thêm metadata break body.    |
+//+------------------------------------------------------------------+
 void DetectMarketStructure()
 {
    g_lastStructure.valid = false;
@@ -839,6 +889,11 @@ void DetectMarketStructure()
    }
 }
 
+//+------------------------------------------------------------------+
+//| DetectLiquiditySweep: quét thanh khoản SSL/BSL theo external.    |
+//| Duyệt nhiều bar (InpSweepLookbackBars), lấy sweep đầu tiên hợp lệ|
+//| để tránh overfit và giữ narrative theo thời gian gần nhất.       |
+//+------------------------------------------------------------------+
 void DetectLiquiditySweep()
 {
    g_lastSweep.valid=false;
@@ -911,6 +966,10 @@ void DetectLiquiditySweep()
 
 double GetATRValue(int shift){ double atrBuf[]; ArraySetAsSeries(atrBuf,true); if(CopyBuffer(g_atrHandle,0,shift,1,atrBuf)<1) return 0.0; return atrBuf[0]; }
 
+//+------------------------------------------------------------------+
+//| DetectDisplacement: nhận diện nến xung lực bằng ATR + body ratio.|
+//| Khi đạt điều kiện, BuildImpulseLeg để phục vụ FVG/OTE narrative. |
+//+------------------------------------------------------------------+
 void DetectDisplacement()
 {
    g_lastDisplacement.valid=false;
@@ -929,6 +988,10 @@ void DetectDisplacement()
    }
 }
 
+//+------------------------------------------------------------------+
+//| BuildImpulseLeg: dựng đoạn impulse từ displacement hiện tại.     |
+//| BUY: min low -> max high; SELL: max high -> min low.             |
+//+------------------------------------------------------------------+
 void BuildImpulseLeg(DisplacementInfo &disp)
 {
    disp.impulseStart=0; disp.impulseEnd=0; disp.impulseStartBar=-1; disp.impulseEndBar=disp.barIndex;
@@ -949,6 +1012,10 @@ void BuildImpulseLeg(DisplacementInfo &disp)
    }
 }
 
+//+------------------------------------------------------------------+
+//| DetectFVG: tìm khoảng trống giá 3 nến quanh displacement candle. |
+//| Kết quả tạo vùng retrace ưu tiên cho Gate 2 (entry resolution).  |
+//+------------------------------------------------------------------+
 void DetectFVG()
 {
    g_lastFVG.valid=false; if(!g_lastDisplacement.valid) return;
@@ -965,6 +1032,10 @@ void DetectFVG()
    }
 }
 
+//+------------------------------------------------------------------+
+//| CalculateOTEZone: dựng vùng OTE từ impulse leg theo fib levels.  |
+//| Gate 3 sẽ kiểm tra overlap/consistency giữa OTE và FVG nếu bật.  |
+//+------------------------------------------------------------------+
 void CalculateOTEZone()
 {
    g_oteZone.valid=false; if(!g_lastDisplacement.valid) return;
@@ -974,6 +1045,10 @@ void CalculateOTEZone()
    else { g_oteZone.lower=NormalizePrice(end+range*InpOTELevel1); g_oteZone.upper=NormalizePrice(end+range*InpOTELevel2); g_oteZone.direction=-1; g_oteZone.valid=true; }
 }
 
+//+------------------------------------------------------------------+
+//| DetermineHTFBias: bias khung lớn từ cấu trúc HH/HL hoặc LH/LL.   |
+//| Bias dùng làm filter định hướng cho setup cuối cùng.             |
+//+------------------------------------------------------------------+
 void DetermineHTFBias()
 {
    int leftBars=InpSwingLeft, rightBars=InpSwingRight, pivotBar=MathMax(1,rightBars);
@@ -1006,6 +1081,11 @@ int BarsSinceTime(datetime t){ if(t<=0) return 9999; int shift=iBarShift(_Symbol
    if(shift<0) return 9999; return shift; }
 bool IsContextExpired(SetupContext &ctx, int maxBars){ if(ctx.startedAt<=0) return false; return (BarsSinceTime(ctx.startedAt) > maxBars); }
 
+//+------------------------------------------------------------------+
+//| UpdateSetupContext: state machine cốt lõi theo từng direction.   |
+//| Chuỗi: WAIT_SWEEP -> SWEEP_CONFIRMED -> SHIFT -> DISPLACEMENT... |
+//| Logic quan trọng: IMP-2 filter chất lượng structure tại SWEEP.   |
+//+------------------------------------------------------------------+
 void UpdateSetupContext(SetupContext &ctx)
 {
    if(ctx.invalid){ ResetContextToWaitSweep(ctx); return; }
@@ -1085,6 +1165,10 @@ void UpdateSetupContext(SetupContext &ctx)
    }
 }
 
+//+------------------------------------------------------------------+
+//| BuildTradeSetup: chọn setup BUY/SELL hợp lệ theo bias và state.  |
+//| Chỉ copy trade từ context đã vào ENTRY_READY.                     |
+//+------------------------------------------------------------------+
 void BuildTradeSetup()
 {
    g_currentSetup.valid=false;
@@ -1102,6 +1186,13 @@ string BuildReasonText(SetupContext &ctx)
    return text;
 }
 
+//+------------------------------------------------------------------+
+//| BuildTradeFromContext: tạo candidate TradeSetup từ narrative đầy đủ|
+//| Gate 1: sweep+structure+displacement (đã qua state machine)       |
+//| Gate 2 (IMP-G2): xử lý vị trí giá/FVG/pending + distance ATR      |
+//| Gate 3 (IMP-G3): kiểm tra OTE, overlap FVG∩OTE, clamp entry       |
+//| Gate 4-5 giữ nguyên: SL validity và risk distance                 |
+//+------------------------------------------------------------------+
 void BuildTradeFromContext(SetupContext &ctx)
 {
    ctx.trade.valid=false;
@@ -1262,6 +1353,10 @@ void BuildTradeFromContext(SetupContext &ctx)
 //============================================================
 // VALIDATION, EXECUTION, MANAGEMENT, VISUALIZATION
 //============================================================
+//+------------------------------------------------------------------+
+//| CheckSessionFilter: lọc phiên theo giờ GMT đã hiệu chỉnh offset. |
+//| Lưu ý FIX-3: TimeCurrent được chuyển sang GMT bằng InpGMTOffset. |
+//+------------------------------------------------------------------+
 bool CheckSessionFilter(); bool HasOpenPosition(int direction); bool HasPendingOrder(int direction); bool HasAnyExposure(int direction);
 bool ValidateBrokerLevels(TradeSetup &setup);
 void ConfigureTradeFilling();
@@ -1290,6 +1385,10 @@ double CalculateLotSize(double entryPrice, double stopLoss)
    return NormalizeVolumeToStep(lots);
 }
 
+//+------------------------------------------------------------------+
+//| ValidateTradeSetup: cổng an toàn trước khi gửi lệnh.             |
+//| Bao gồm session, spread, exposure, PD filter, broker levels.     |
+//+------------------------------------------------------------------+
 bool ValidateTradeSetup()
 {
    if(!g_currentSetup.valid) return false;
@@ -1327,6 +1426,10 @@ bool ValidateBrokerLevels(TradeSetup &setup)
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| ExecuteTradeSetup: gửi market/pending qua CTrade.                |
+//| Sau khi gửi thành công: cập nhật đúng global context state/order.|
+//+------------------------------------------------------------------+
 void ExecuteTradeSetup(TradeSetup &setup)
 {
    ConfigureTradeFilling();
@@ -1373,6 +1476,10 @@ void ApplyATRTrailing(ulong ticket, int dir, double currentPrice, double openPri
 void ApplySwingTrailing(ulong ticket, int dir, double sl, double tp)
 { SwingPoint sw; if(!GetLastUnbrokenSwing(SWING_INTERNAL, dir==1?false:true, sw)) return; double buf=InpSLBufferPoints*_Point, newSL=sl; if(dir==1){ double c=NormalizePrice(sw.price-buf); if(c>sl) newSL=c; } else { double c=NormalizePrice(sw.price+buf); if(c<sl) newSL=c; } if(newSL!=sl) g_trade.PositionModify(ticket,newSL,tp); }
 
+//+------------------------------------------------------------------+
+//| ManagePositions: quản trị lệnh mở (partial, BE, trailing).       |
+//| Tối ưu cho giả định one-trade-per-symbol của EA hiện tại.        |
+//+------------------------------------------------------------------+
 void ManagePositions()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
@@ -1401,6 +1508,10 @@ void ManagePositions()
    }
 }
 
+//+------------------------------------------------------------------+
+//| ManagePendingOrders: quét và xóa pending quá hạn theo expiry.    |
+//| Giữ sạch exposure cũ để tránh xung đột narrative mới.            |
+//+------------------------------------------------------------------+
 void ManagePendingOrders()
 {
    for(int i=OrdersTotal()-1;i>=0;i--)
@@ -1419,6 +1530,10 @@ void ManagePendingOrders()
 
 void ManageOrdersAndPositions(){ g_symbol.RefreshRates(); ManagePositions(); ManagePendingOrders(); }
 
+//+------------------------------------------------------------------+
+//| CheckSessionFilter: lọc phiên theo giờ GMT đã hiệu chỉnh offset. |
+//| Lưu ý FIX-3: TimeCurrent được chuyển sang GMT bằng InpGMTOffset. |
+//+------------------------------------------------------------------+
 bool CheckSessionFilter()
 {
    if(!InpUseSessionFilter) return true;
@@ -1541,6 +1656,10 @@ void DrawTradeSetupObjects()
    }
 }
 
+//+------------------------------------------------------------------+
+//| DrawICTObjects: lớp visualization narrative (events + setup).    |
+//| Không ảnh hưởng logic giao dịch, chỉ hiển thị/chẩn đoán.         |
+//+------------------------------------------------------------------+
 void DrawICTObjects()
 {
    if(InpShowSwings){ DrawSwingArray(g_internalSwings,g_internalCount,"ISW_",clrSilver); DrawSwingArray(g_externalSwings,g_externalCount,"ESW_",clrWhite); }
