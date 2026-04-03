@@ -165,13 +165,15 @@ def build_ma_distance_features(df: pd.DataFrame, ma_periods: tuple[int, ...]) ->
     return out
 
 
-def _resolve_horizon(index: int, n_rows: int, config: LabelConfig, rng: random.Random) -> int:
+def _resolve_horizon(index: int, n_rows: int, config: LabelConfig, rng: random.Random) -> int | None:
     if config.horizon_mode == "fixed":
         horizon = config.horizon_bars
     else:
         horizon = rng.randint(config.horizon_min, config.horizon_max)
     max_allowed = n_rows - index - 1
-    return min(horizon, max_allowed)
+    if horizon > max_allowed:
+        return None
+    return horizon
 
 
 def _simulate_grid_payoff(
@@ -219,11 +221,10 @@ def generate_labels(
     horizons: list[int] = []
 
     n_rows = len(labeled)
+    valid_indices: list[pd.Timestamp] = []
     for idx in range(n_rows):
         horizon = _resolve_horizon(idx, n_rows, config.label, rng)
-        if horizon <= 0:
-            labels.append(LABEL_NO_TRADE)
-            horizons.append(0)
+        if horizon is None or horizon <= 0:
             continue
 
         future_path = labeled["close"].iloc[idx : idx + horizon + 1]
@@ -249,7 +250,9 @@ def generate_labels(
         else:
             labels.append(LABEL_NO_TRADE)
         horizons.append(horizon)
+        valid_indices.append(labeled.index[idx])
 
+    labeled = labeled.loc[valid_indices].copy()
     labeled["label"] = labels
     labeled["label_horizon"] = horizons
     if not config.include_no_trade_class:
@@ -395,14 +398,33 @@ def backtest_predictions(
     config: StrategyConfig,
 ) -> BacktestResult:
     """Backtest point-in-time predictions with deterministic grid payoff execution."""
-    trade_events: list[dict[str, Any]] = []
-    horizon = config.label.horizon_bars
+    if "label_horizon" not in df.columns:
+        raise ValueError("backtest_predictions requires 'label_horizon' column for horizon-consistent evaluation.")
 
-    for idx in range(len(df) - horizon):
+    trade_events: list[dict[str, Any]] = []
+    next_entry_idx = 0
+
+    for idx in range(len(df)):
+        if idx < next_entry_idx:
+            continue
         signal = int(predictions.iloc[idx])
         if signal == LABEL_NO_TRADE:
             continue
-        future_prices = df["close"].iloc[idx : idx + horizon + 1]
+
+        realized_horizon = int(df["label_horizon"].iloc[idx])
+        if realized_horizon <= 0:
+            raise ValueError(f"Invalid non-positive horizon at row {idx}: {realized_horizon}")
+
+        end_idx = idx + realized_horizon
+        if end_idx >= len(df):
+            continue
+
+        future_prices = df["close"].iloc[idx : end_idx + 1]
+        if len(future_prices) != realized_horizon + 1:
+            raise ValueError(
+                f"Horizon mismatch at row {idx}: horizon={realized_horizon}, path_len={len(future_prices)}"
+            )
+
         entry_time = df.index[idx]
         if signal == LABEL_LONG:
             event = simulate_long_grid_trade(entry_time, future_prices, config)
@@ -411,6 +433,8 @@ def backtest_predictions(
         else:
             continue
         trade_events.append(event)
+        # Enforce single active trade: skip all intermediate signals until this trade exits.
+        next_entry_idx = end_idx
 
     trade_log = pd.DataFrame(trade_events)
     if trade_log.empty:
@@ -537,11 +561,15 @@ def export_to_mql5(
         "grid_distances": list(config.grid_distances),
         "grid_coefficients": list(config.grid_coefficients),
         "feature_order": feature_order,
+        "feature_definition": "dist_ma_p = close_t - mean(close_{t-p+1..t}) using last closed bar t (shift=1 in MQL5)",
+        "bar_convention": "MQL5 FillFeatures must compute over closed bars only, with closes[period-1] as close_t.",
     }
 
     mqh = []
     mqh.append("// AUTO-GENERATED. DO NOT EDIT MANUALLY.")
     mqh.append("// Feature order must match Python training order 100%.")
+    mqh.append("// Feature semantics: dist_ma_p = close_t - mean(close over last p bars ending at t).")
+    mqh.append("// Bar convention: t is the latest CLOSED bar (shift=1), never the forming bar.")
     mqh.append("#include <Math\\Stat\\Math.mqh>")
     feature_order_mql = ','.join('\"' + name + '\"' for name in feature_order)
     mqh.append(f"string FEATURE_ORDER[{len(feature_order)}] = {{{feature_order_mql}}};")
@@ -554,8 +582,9 @@ def export_to_mql5(
     )
     mqh.append(
         "void FillFeatures(double &features[]) { ArrayResize(features, ArraySize(MA_PERIODS)); "
-        "for(int i=0;i<ArraySize(MA_PERIODS);i++){double pr[];CopyClose(NULL, PERIOD_CURRENT, 1, MA_PERIODS[i], pr);"
-        "double mean=MathMean(pr);features[i]=pr[MA_PERIODS[i]-1]-mean;} }"
+        "for(int i=0;i<ArraySize(MA_PERIODS);i++){int p=MA_PERIODS[i];double closes[];int copied=CopyClose(NULL, PERIOD_CURRENT, 1, p, closes);"
+        "if(copied!=p){features[i]=0.0;continue;} ArraySetAsSeries(closes,false); double sum=0.0; "
+        "for(int j=0;j<p;j++){sum+=closes[j];} double mean=sum/p; double close_t=closes[p-1]; features[i]=close_t-mean;} }"
     )
     mqh.append("// CatBoost C++ inference code below.")
     mqh.append(cpp_code)
@@ -578,9 +607,10 @@ def run_pipeline(config: StrategyConfig) -> dict[str, Any]:
         shutdown_mt5()
 
     featured = build_ma_distance_features(prices, config.ma_periods)
-    labeled = generate_labels(featured, config)
     feature_names = [f"dist_ma_{period}" for period in config.ma_periods]
-    splits = split_by_time(labeled, config)
+    raw_splits = split_by_time(featured, config)
+    # Prevent split-boundary leakage: each split labels using only in-split future bars.
+    splits = {split_name: generate_labels(split_df, config) for split_name, split_df in raw_splits.items()}
 
     artifacts = train_catboost(splits["train"], splits["validation"], feature_names, config)
     eval_validation = evaluate_split(splits["validation"], artifacts, "validation", config)
