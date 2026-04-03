@@ -481,8 +481,8 @@ void OpenInitialTrade(int direction)
 
 void OpenGridTrade(int direction, int basketId)
 {
-   BasketInfo &b = (direction > 0 ? g_buyBasket : g_sellBasket);
-   double lot = CalculateNextLot(direction, b.numberOfOrders);
+   int basketDepth = (direction > 0 ? g_buyBasket.numberOfOrders : g_sellBasket.numberOfOrders);
+   double lot = CalculateNextLot(direction, basketDepth);
    if(lot <= 0.0) return;
 
    string comment = StringFormat("LF_GRID_%d", basketId);
@@ -490,7 +490,10 @@ void OpenGridTrade(int direction, int basketId)
    {
       g_daily.openedLots += lot;
       g_daily.totalTrades++;
-      b.lastAddTime = TimeCurrent();
+      if(direction > 0)
+         g_buyBasket.lastAddTime = TimeCurrent();
+      else
+         g_sellBasket.lastAddTime = TimeCurrent();
       if(InpDebugMode) Print("Grid trade opened dir=", direction, " lot=", lot, " basket=", basketId);
    }
 }
@@ -508,23 +511,39 @@ void UpdateBasketStats()
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      int type = (int)PositionGetInteger(POSITION_TYPE);
-      BasketInfo &b = (type == POSITION_TYPE_BUY ? g_buyBasket : g_sellBasket);
-
       double vol = PositionGetDouble(POSITION_VOLUME);
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      b.weightedAvgPrice = ((b.weightedAvgPrice * b.totalLots) + (openPrice * vol)) / (b.totalLots + vol);
-      b.totalLots += vol;
-      b.floatingProfit += PositionGetDouble(POSITION_PROFIT);
-      b.numberOfOrders++;
-      b.isActive = true;
-      if(b.basketId == 0)
-         b.basketId = BuildBasketId(b.direction);
-      if(b.creationTime == 0)
-         b.creationTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int type = (int)PositionGetInteger(POSITION_TYPE);
+      if(type == POSITION_TYPE_BUY)
+      {
+         g_buyBasket.weightedAvgPrice = ((g_buyBasket.weightedAvgPrice * g_buyBasket.totalLots) + (openPrice * vol)) / (g_buyBasket.totalLots + vol);
+         g_buyBasket.totalLots += vol;
+         g_buyBasket.floatingProfit += PositionGetDouble(POSITION_PROFIT);
+         g_buyBasket.numberOfOrders++;
+         g_buyBasket.isActive = true;
+         if(g_buyBasket.basketId == 0)
+            g_buyBasket.basketId = BuildBasketId(g_buyBasket.direction);
+         if(g_buyBasket.creationTime == 0)
+            g_buyBasket.creationTime = (datetime)PositionGetInteger(POSITION_TIME);
 
-      if((b.direction > 0 && openPrice > b.lastAddPrice) || (b.direction < 0 && (b.lastAddPrice == 0.0 || openPrice < b.lastAddPrice)))
-         b.lastAddPrice = openPrice;
+         if(openPrice > g_buyBasket.lastAddPrice)
+            g_buyBasket.lastAddPrice = openPrice;
+      }
+      else if(type == POSITION_TYPE_SELL)
+      {
+         g_sellBasket.weightedAvgPrice = ((g_sellBasket.weightedAvgPrice * g_sellBasket.totalLots) + (openPrice * vol)) / (g_sellBasket.totalLots + vol);
+         g_sellBasket.totalLots += vol;
+         g_sellBasket.floatingProfit += PositionGetDouble(POSITION_PROFIT);
+         g_sellBasket.numberOfOrders++;
+         g_sellBasket.isActive = true;
+         if(g_sellBasket.basketId == 0)
+            g_sellBasket.basketId = BuildBasketId(g_sellBasket.direction);
+         if(g_sellBasket.creationTime == 0)
+            g_sellBasket.creationTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+         if(g_sellBasket.lastAddPrice == 0.0 || openPrice < g_sellBasket.lastAddPrice)
+            g_sellBasket.lastAddPrice = openPrice;
+      }
    }
 
    if(g_buyBasket.isActive)
@@ -569,61 +588,86 @@ bool CloseBasket(const int direction)
 
 void ManageBasketClose()
 {
-   BasketInfo *arr[2] = {&g_buyBasket, &g_sellBasket};
-   for(int i = 0; i < 2; i++)
+   if(g_buyBasket.isActive)
    {
-      BasketInfo &b = *arr[i];
-      if(!b.isActive) continue;
-
       double tpMoney = InpBasketTakeProfitMoney;
       if(g_market.isPanic)
          tpMoney *= 0.6;
 
-      bool closeByTarget = b.floatingProfit >= tpMoney;
+      bool closeByTarget = g_buyBasket.floatingProfit >= tpMoney;
       bool closeByTrail = false;
-      if(InpBasketTrailingEnabled && b.trailingArmed)
+      if(InpBasketTrailingEnabled && g_buyBasket.trailingArmed)
       {
-         double trailLevel = b.peakProfit - InpBasketTrailingStep;
-         closeByTrail = (b.floatingProfit <= trailLevel);
+         double trailLevel = g_buyBasket.peakProfit - InpBasketTrailingStep;
+         closeByTrail = (g_buyBasket.floatingProfit <= trailLevel);
       }
 
-      bool closeByStagnation = (TimeCurrent() - b.creationTime) > (InpBasketMaxLifetimeMinutes * 60);
+      bool closeByStagnation = (TimeCurrent() - g_buyBasket.creationTime) > (InpBasketMaxLifetimeMinutes * 60);
 
       if(closeByTarget || closeByTrail || closeByStagnation)
       {
          if(InpDebugMode)
-            Print("Closing basket ", b.basketId, " reason=", (closeByTarget ? "TP" : (closeByTrail ? "TRAIL" : "TIME")));
-         CloseBasket(b.direction);
+            Print("Closing basket ", g_buyBasket.basketId, " reason=", (closeByTarget ? "TP" : (closeByTrail ? "TRAIL" : "TIME")));
+         CloseBasket(g_buyBasket.direction);
+      }
+   }
+
+   if(g_sellBasket.isActive)
+   {
+      double tpMoney = InpBasketTakeProfitMoney;
+      if(g_market.isPanic)
+         tpMoney *= 0.6;
+
+      bool closeByTarget = g_sellBasket.floatingProfit >= tpMoney;
+      bool closeByTrail = false;
+      if(InpBasketTrailingEnabled && g_sellBasket.trailingArmed)
+      {
+         double trailLevel = g_sellBasket.peakProfit - InpBasketTrailingStep;
+         closeByTrail = (g_sellBasket.floatingProfit <= trailLevel);
+      }
+
+      bool closeByStagnation = (TimeCurrent() - g_sellBasket.creationTime) > (InpBasketMaxLifetimeMinutes * 60);
+
+      if(closeByTarget || closeByTrail || closeByStagnation)
+      {
+         if(InpDebugMode)
+            Print("Closing basket ", g_sellBasket.basketId, " reason=", (closeByTarget ? "TP" : (closeByTrail ? "TRAIL" : "TIME")));
+         CloseBasket(g_sellBasket.direction);
       }
    }
 }
 
 void ManageGridOrders()
 {
-   BasketInfo *arr[2] = {&g_buyBasket, &g_sellBasket};
    MqlTick tick;
    SymbolInfoTick(_Symbol, tick);
 
-   for(int i = 0; i < 2; i++)
+   if(g_buyBasket.isActive && g_buyBasket.numberOfOrders < InpMaxGridOrdersPerSide)
    {
-      BasketInfo &b = *arr[i];
-      if(!b.isActive) continue;
-      if(b.numberOfOrders >= InpMaxGridOrdersPerSide) continue;
+      if(MathAbs(g_buyBasket.floatingProfit) < InpMaxBasketLossMoney)
+      {
+         double refPrice = (g_buyBasket.lastAddPrice > 0.0 ? g_buyBasket.lastAddPrice : g_buyBasket.weightedAvgPrice);
+         if(refPrice > 0.0)
+         {
+            double adverse = (refPrice - tick.bid) / _Point;
+            if(adverse >= InpGridStepPoints)
+               OpenGridTrade(g_buyBasket.direction, g_buyBasket.basketId);
+         }
+      }
+   }
 
-      if(MathAbs(b.floatingProfit) >= InpMaxBasketLossMoney)
-         continue;
-
-      double refPrice = (b.lastAddPrice > 0.0 ? b.lastAddPrice : b.weightedAvgPrice);
-      if(refPrice <= 0.0) continue;
-
-      double adverse = 0.0;
-      if(b.direction > 0)
-         adverse = (refPrice - tick.bid) / _Point;
-      else
-         adverse = (tick.ask - refPrice) / _Point;
-
-      if(adverse >= InpGridStepPoints)
-         OpenGridTrade(b.direction, b.basketId);
+   if(g_sellBasket.isActive && g_sellBasket.numberOfOrders < InpMaxGridOrdersPerSide)
+   {
+      if(MathAbs(g_sellBasket.floatingProfit) < InpMaxBasketLossMoney)
+      {
+         double refPrice = (g_sellBasket.lastAddPrice > 0.0 ? g_sellBasket.lastAddPrice : g_sellBasket.weightedAvgPrice);
+         if(refPrice > 0.0)
+         {
+            double adverse = (tick.ask - refPrice) / _Point;
+            if(adverse >= InpGridStepPoints)
+               OpenGridTrade(g_sellBasket.direction, g_sellBasket.basketId);
+         }
+      }
    }
 }
 
